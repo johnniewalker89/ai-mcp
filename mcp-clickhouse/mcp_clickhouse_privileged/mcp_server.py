@@ -329,7 +329,10 @@ def start_async_query(
     final_query_id = query_id or f"ai_mcp_{uuid.uuid4()}"
     _validate_query_id(final_query_id)
 
-    future = executor.submit(_execute_query, database, query, 1000, final_query_id, settings)
+    request_settings = _settings(settings).copy()
+    request_settings.setdefault("max_execution_time", get_config().default_max_execution_time)
+
+    future = executor.submit(_execute_query, database, query, 1000, final_query_id, request_settings)
     async_jobs[final_query_id] = AsyncJob(
         query_id=final_query_id,
         submitted_at=datetime.now(timezone.utc).isoformat(),

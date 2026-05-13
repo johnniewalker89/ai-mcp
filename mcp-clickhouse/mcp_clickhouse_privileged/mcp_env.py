@@ -65,6 +65,10 @@ class ClickHouseConfig:
         return int(os.getenv("CLICKHOUSE_MCP_QUERY_TIMEOUT", "300"))
 
     @property
+    def default_max_execution_time(self) -> int:
+        return int(os.getenv("CLICKHOUSE_MCP_MAX_EXECUTION_TIME", str(self.send_receive_timeout)))
+
+    @property
     def allow_write_access(self) -> bool:
         return _bool_env("CLICKHOUSE_ALLOW_WRITE_ACCESS", "false")
 

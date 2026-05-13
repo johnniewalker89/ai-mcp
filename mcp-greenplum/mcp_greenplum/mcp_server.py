@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 import logging
 import re
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -55,6 +57,7 @@ if mcp_config.server_transport in http_transports:
         )
 
 mcp = FastMCP(name=MCP_SERVER_NAME, auth=auth_provider)
+executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="greenplum-mcp")
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -214,6 +217,70 @@ class TableInfo:
 
 
 table_pagination_cache: TTLCache = TTLCache(maxsize=100, ttl=3600)
+
+
+@dataclass
+class AsyncJob:
+    job_id: str
+    submitted_at: str
+    database: str
+    query_preview: str
+    future: Optional[Future] = field(default=None, repr=False)
+    connection: Any = field(default=None, repr=False)
+    backend_pid: Optional[int] = None
+
+
+async_jobs: Dict[str, AsyncJob] = {}
+
+
+def _execute_query_async(
+    job: AsyncJob,
+    database: str,
+    query: str,
+    max_rows: int,
+) -> Dict[str, Any]:
+    mcp_cfg = get_mcp_config()
+
+    conn = create_connection(database)
+    job.connection = conn
+    try:
+        job.backend_pid = conn.get_backend_pid()
+        with conn.cursor() as cur:
+            _apply_write_transaction(cur, mcp_cfg.query_timeout)
+            cur.execute(query)
+
+            columns: List[str] = []
+            rows: List[Tuple[Any, ...]] = []
+            truncated = False
+
+            if cur.description is not None:
+                columns = [desc[0] for desc in cur.description]
+                rows = list(cur.fetchmany(max_rows))
+                extra = cur.fetchone()
+                truncated = extra is not None
+
+            status_message = cur.statusmessage
+            conn.commit()
+
+            return {
+                "columns": columns,
+                "rows": _to_jsonable_rows(rows),
+                "truncated": truncated,
+                "status_message": status_message,
+                "backend_pid": job.backend_pid,
+            }
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        job.connection = None
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def list_databases() -> List[str]:
@@ -676,6 +743,120 @@ def run_query(
         raise ToolError(f"Query execution failed: {str(e)}")
 
 
+def start_async_query(
+    query: str,
+    database: Optional[str] = None,
+    max_rows: int = 100,
+    job_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Start one Greenplum statement in a background worker.
+
+    Intended for approved privileged sandbox actions that may outlive a normal
+    MCP tool call. Use `get_query_status` to collect the result and
+    `cancel_query` to cancel this server's own background connection.
+    """
+
+    cfg = get_config()
+    target_db = database or cfg.database
+    _validate_write_query(query)
+    if max_rows <= 0:
+        raise ToolError("max_rows must be a positive integer.")
+
+    final_job_id = job_id or f"ai_mcp_{uuid.uuid4()}"
+    if not re.match(r"^[A-Za-z0-9_.:\-]{1,160}$", final_job_id):
+        raise ToolError("job_id contains unsupported characters.")
+
+    job = AsyncJob(
+        job_id=final_job_id,
+        submitted_at=datetime.now(timezone.utc).isoformat(),
+        database=target_db,
+        query_preview=query[:1000],
+    )
+    future = executor.submit(_execute_query_async, job, target_db, query, max_rows)
+    job.future = future
+    async_jobs[final_job_id] = job
+
+    return {
+        "job_id": final_job_id,
+        "status": "running",
+        "database": target_db,
+    }
+
+
+def get_query_status(job_id: str) -> Dict[str, Any]:
+    """
+    Return status/result for a Greenplum async job started by this MCP server.
+    """
+
+    job = async_jobs.get(job_id)
+    if job is None:
+        raise ToolError(f"Unknown async job_id: {job_id}")
+
+    if job.future and job.future.done():
+        try:
+            return {
+                "job_id": job_id,
+                "status": "completed",
+                "submitted_at": job.submitted_at,
+                "database": job.database,
+                "backend_pid": job.backend_pid,
+                "result": job.future.result(),
+            }
+        except Exception as e:
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "submitted_at": job.submitted_at,
+                "database": job.database,
+                "backend_pid": job.backend_pid,
+                "error": str(e),
+            }
+
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "submitted_at": job.submitted_at,
+        "database": job.database,
+        "backend_pid": job.backend_pid,
+    }
+
+
+def cancel_query(job_id: str) -> Dict[str, Any]:
+    """
+    Cancel a Greenplum async query started by this MCP server.
+
+    This uses psycopg2 connection.cancel(), so it is scoped to this server's own
+    background connection and does not require terminating another user's
+    backend.
+    """
+
+    job = async_jobs.get(job_id)
+    if job is None:
+        raise ToolError(f"Unknown async job_id: {job_id}")
+
+    if job.future and job.future.done():
+        return {
+            "job_id": job_id,
+            "status": "already_done",
+            "backend_pid": job.backend_pid,
+        }
+
+    if job.connection is None:
+        return {
+            "job_id": job_id,
+            "status": "cancel_not_ready",
+            "backend_pid": job.backend_pid,
+        }
+
+    job.connection.cancel()
+    return {
+        "job_id": job_id,
+        "status": "cancel_sent",
+        "backend_pid": job.backend_pid,
+    }
+
+
 # Register tools based on configuration
 if os.getenv("GREENPLUM_ENABLED", "true").lower() == "true":
     mcp.add_tool(Tool.from_function(list_databases))
@@ -684,5 +865,8 @@ if os.getenv("GREENPLUM_ENABLED", "true").lower() == "true":
     mcp.add_tool(Tool.from_function(describe_table))
     mcp.add_tool(Tool.from_function(run_select_query))
     mcp.add_tool(Tool.from_function(run_query))
+    mcp.add_tool(Tool.from_function(start_async_query))
+    mcp.add_tool(Tool.from_function(get_query_status))
+    mcp.add_tool(Tool.from_function(cancel_query))
     logger.info("Greenplum tools registered")
 

@@ -37,5 +37,6 @@ Credentials and host-specific settings belong only in local MCP client config.
 - `CLICKHOUSE_VERIFY`, default `true`
 - `CLICKHOUSE_CONNECT_TIMEOUT`, default `30`
 - `CLICKHOUSE_MCP_QUERY_TIMEOUT`, default `300`
+- `CLICKHOUSE_MCP_MAX_EXECUTION_TIME`, default `CLICKHOUSE_MCP_QUERY_TIMEOUT`, applied to async queries unless caller overrides it
 - `CLICKHOUSE_ALLOW_WRITE_ACCESS`, default `false`
 - `CLICKHOUSE_ALLOW_DROP`, default `false`
