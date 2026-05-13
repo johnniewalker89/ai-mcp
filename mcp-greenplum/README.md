@@ -1,5 +1,9 @@
 # mcp-greenplum
 
+Privileged entrypoint: `mcp-greenplum-privileged`.
+
+`mcp-greenplum` remains available as a backward-compatible alias.
+
 MCP-сервер для Greenplum 6. Позволяет AI-ассистентам (Claude Desktop, Cursor и др.)
 читать метаданные и выполнять SELECT-запросы к Greenplum через протокол MCP.
 

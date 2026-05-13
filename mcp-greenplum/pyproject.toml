@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 mcp-greenplum = "mcp_greenplum.main:main"
+mcp-greenplum-privileged = "mcp_greenplum.main:main"
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "pytest-asyncio"]

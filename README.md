@@ -31,7 +31,7 @@ command = "uvx"
 args = [
   "--from",
   "git+https://github.com/johnniewalker89/ai-mcp.git#subdirectory=mcp-greenplum",
-  "mcp-greenplum"
+  "mcp-greenplum-privileged"
 ]
 ```
 
