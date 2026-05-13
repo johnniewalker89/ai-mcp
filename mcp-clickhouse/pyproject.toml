@@ -1,0 +1,26 @@
+[project]
+name = "ai-mcp-clickhouse"
+version = "0.1.0"
+description = "Privileged ClickHouse MCP server for controlled sandbox operations."
+requires-python = ">=3.10"
+dependencies = [
+  "clickhouse-connect>=0.8.0",
+  "fastmcp>=2.0.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+mcp-clickhouse-privileged = "mcp_clickhouse_privileged.main:main"
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_clickhouse_privileged"]
+
+[tool.ruff]
+line-length = 100
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

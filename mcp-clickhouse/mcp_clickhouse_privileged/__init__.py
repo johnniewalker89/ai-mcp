@@ -1,0 +1,1 @@
+"""Privileged ClickHouse MCP server."""
