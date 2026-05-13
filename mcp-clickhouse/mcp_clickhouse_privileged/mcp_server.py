@@ -180,21 +180,21 @@ def _execute_query(
 ) -> Dict[str, Any]:
     _validate_query(query)
     first = _extract_first_keyword(query)
-    transport_settings = {"query_id": query_id} if query_id else None
+    request_settings = _settings(settings).copy()
+    if query_id:
+        request_settings["query_id"] = query_id
     client = create_client(database)
     try:
         if first in ALLOWED_SELECT_FIRST_KEYWORDS:
             result = client.query(
                 query,
-                settings=_settings(settings),
-                transport_settings=transport_settings,
+                settings=request_settings,
             )
             return _query_result_to_dict(result, max_rows)
 
         command_result = client.command(
             query,
-            settings=_settings(settings),
-            transport_settings=transport_settings,
+            settings=request_settings,
         )
         return {
             "columns": [],
