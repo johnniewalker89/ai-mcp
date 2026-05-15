@@ -1,15 +1,16 @@
 # AI MCP
 
-Portable MCP servers for Codex and other MCP-compatible agents.
+Переносимые MCP-серверы для Codex и других MCP-совместимых агентов.
 
-## Packages
+## Пакеты
 
-- `mcp-greenplum` - Greenplum MCP server with metadata tools, read-only query
-  tool, and optional write/drop tool controlled by environment flags.
-- `mcp-clickhouse` - ClickHouse MCP server with metadata/query tools,
-  optional write/drop access, and async query control for long sandbox writes.
+- `mcp-greenplum` — MCP-сервер Greenplum с tools для метаданных,
+  read-only запросов и опциональных write/drop действий, которые включаются
+  только через переменные окружения.
+- `mcp-clickhouse` — MCP-сервер ClickHouse с tools для метаданных и запросов,
+  опциональным write/drop доступом и async-управлением долгими sandbox writes.
 
-## Install Example
+## Пример установки
 
 ClickHouse:
 
@@ -35,4 +36,5 @@ args = [
 ]
 ```
 
-Credentials and host-specific settings belong only in local MCP client config.
+Credentials и настройки конкретного хоста должны жить только в локальном
+конфиге MCP-клиента.
