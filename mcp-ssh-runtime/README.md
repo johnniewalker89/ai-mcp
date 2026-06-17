@@ -103,6 +103,7 @@ tools instead of typed Airflow CLI tools:
 [mcp_servers.ssh_runtime]
 command = "uvx"
 args = [
+  "--refresh",
   "--from",
   "git+https://github.com/johnniewalker89/ai-mcp.git#subdirectory=mcp-ssh-runtime",
   "mcp-ssh-runtime"
