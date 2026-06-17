@@ -34,6 +34,30 @@ def test_prod_like_airflow_control_requires_approval() -> None:
         ensure_action_allowed(host(HostProfile.AIRFLOW_PROD_LIKE), ActionClass.AIRFLOW_CONTROL)
 
 
+def test_legacy_airflow_fs_only_blocks_airflow_cli_read() -> None:
+    with pytest.raises(RuntimeAccessError, match="Airflow CLI tools are unavailable"):
+        ensure_action_allowed(
+            host(HostProfile.LEGACY_AIRFLOW_FS_ONLY),
+            ActionClass.AIRFLOW_READ,
+        )
+
+
+def test_legacy_airflow_fs_only_allows_ssh_read_and_approved_host_change() -> None:
+    ensure_action_allowed(host(HostProfile.LEGACY_AIRFLOW_FS_ONLY), ActionClass.SSH_READ)
+
+    with pytest.raises(RuntimeAccessError):
+        ensure_action_allowed(
+            host(HostProfile.LEGACY_AIRFLOW_FS_ONLY),
+            ActionClass.HOST_CHANGE,
+        )
+
+    ensure_action_allowed(
+        host(HostProfile.LEGACY_AIRFLOW_FS_ONLY),
+        ActionClass.HOST_CHANGE,
+        approved=True,
+    )
+
+
 def test_db_dev_blocks_airflow_read() -> None:
     with pytest.raises(RuntimeAccessError):
         ensure_action_allowed(host(HostProfile.DB_DEV), ActionClass.AIRFLOW_READ)

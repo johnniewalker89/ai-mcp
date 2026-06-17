@@ -51,7 +51,7 @@ args = [
 ]
 
 [mcp_servers.ssh_runtime.env]
-SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=airflow_prod_like,GP-dev=db_dev"
+SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=legacy_airflow_fs_only,GP-dev=db_dev"
 ```
 
 Credentials и настройки конкретного хоста должны жить только в локальном

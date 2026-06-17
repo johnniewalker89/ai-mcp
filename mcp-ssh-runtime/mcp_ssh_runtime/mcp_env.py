@@ -21,6 +21,7 @@ class HostProfile(str, Enum):
     AIRFLOW_DEV = "airflow_dev"
     AIRFLOW_PROD = "airflow_prod"
     AIRFLOW_PROD_LIKE = "airflow_prod_like"
+    LEGACY_AIRFLOW_FS_ONLY = "legacy_airflow_fs_only"
     DB_DEV = "db_dev"
     UNKNOWN = "unknown"
 
@@ -140,6 +141,21 @@ class SSHRuntimeConfig:
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
         return os.getenv("SSH_RUNTIME_AIRFLOW_PATH", default_path)
+
+    @property
+    def legacy_airflow_autogen_dir(self) -> str:
+        return os.getenv(
+            "SSH_RUNTIME_LEGACY_AIRFLOW_AUTOGEN_DIR",
+            "/opt/airflow/airflow/dags/autogen",
+        )
+
+    @property
+    def legacy_airflow_yml_dir(self) -> str:
+        return os.getenv("SSH_RUNTIME_LEGACY_AIRFLOW_YML_DIR", "/opt/airflow/airflow/yml")
+
+    @property
+    def legacy_airflow_logs_dir(self) -> str:
+        return os.getenv("SSH_RUNTIME_LEGACY_AIRFLOW_LOGS_DIR", "/opt/airflow/airflow/logs")
 
 
 class MCPServerConfig:

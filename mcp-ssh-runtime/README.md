@@ -21,6 +21,10 @@ tool exists only for explicit approval cases.
 - `service_restart`
 - `process_list`
 - `run_approved_command`
+- `legacy_airflow_dag_file`
+- `legacy_airflow_config_list`
+- `legacy_airflow_task_log_list`
+- `legacy_airflow_task_log_tail`
 - `airflow_version`
 - `airflow_list_import_errors`
 - `airflow_dags_list`
@@ -42,6 +46,9 @@ Host profiles are configured locally through `SSH_RUNTIME_HOST_PROFILES`.
 - `airflow_prod`: allows `ssh_read` and `airflow_read`; `airflow_control`
   and `host_change` need `approved=true`.
 - `airflow_prod_like`: same as `airflow_prod`.
+- `legacy_airflow_fs_only`: old Airflow/Pentaho-style host with no typed
+  Airflow CLI capability; allows `ssh_read` only by default and `host_change`
+  only with `approved=true`.
 - `db_dev`: allows `ssh_read`; `host_change` needs `approved=true`.
 - `unknown`: allows `ssh_read` only.
 
@@ -81,6 +88,15 @@ Default Airflow values:
 
 Override them in the local MCP client config if a host differs.
 
+For legacy Airflow hosts without non-interactive sudo/login access to the
+Airflow OS user, use `legacy_airflow_fs_only` and the legacy filesystem/log
+tools instead of typed Airflow CLI tools:
+
+- `legacy_airflow_dag_file`
+- `legacy_airflow_config_list`
+- `legacy_airflow_task_log_list`
+- `legacy_airflow_task_log_tail`
+
 ## Local Config Example
 
 ```toml
@@ -93,7 +109,7 @@ args = [
 ]
 
 [mcp_servers.ssh_runtime.env]
-SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=airflow_prod_like,GP-dev=db_dev"
+SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=legacy_airflow_fs_only,GP-dev=db_dev"
 SSH_RUNTIME_COMMAND_TIMEOUT = "120"
 SSH_RUNTIME_MAX_OUTPUT_CHARS = "200000"
 SSH_RUNTIME_AIRFLOW_OS_USER = "airflow"

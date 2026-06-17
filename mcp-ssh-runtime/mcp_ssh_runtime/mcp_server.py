@@ -44,6 +44,10 @@ from mcp_ssh_runtime.remote_commands import (
     build_file_list_command,
     build_file_read_command,
     build_file_stat_command,
+    build_legacy_airflow_config_list_command,
+    build_legacy_airflow_dag_file_command,
+    build_legacy_airflow_log_list_command,
+    build_legacy_airflow_log_tail_command,
     build_process_list_command,
     build_service_logs_command,
     build_service_restart_command,
@@ -269,6 +273,106 @@ def process_list(alias: str, pattern: str | None = None) -> dict[str, object]:
     try:
         command = build_process_list_command(pattern=pattern)
         return run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def legacy_airflow_dag_file(
+    alias: str,
+    dag_id: str,
+    head_lines: int = 80,
+) -> dict[str, object]:
+    """Read old Airflow deployed autogen DAG file metadata and header without Airflow CLI."""
+
+    cfg, host = _host(ActionClass.SSH_READ, alias)
+    try:
+        command = build_legacy_airflow_dag_file_command(
+            cfg.legacy_airflow_autogen_dir,
+            dag_id,
+            head_lines=head_lines,
+        )
+        result = run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+        result["evidence_note"] = (
+            "Legacy Airflow filesystem evidence only; this does not prove Airflow CLI "
+            "metadata state."
+        )
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def legacy_airflow_config_list(
+    alias: str,
+    relative_path: str = "",
+    max_depth: int = 2,
+    max_entries: int = 200,
+) -> dict[str, object]:
+    """List old Airflow deployed yml/config files without Airflow CLI."""
+
+    cfg, host = _host(ActionClass.SSH_READ, alias)
+    try:
+        command = build_legacy_airflow_config_list_command(
+            cfg.legacy_airflow_yml_dir,
+            relative_path=relative_path,
+            max_depth=max_depth,
+            max_entries=max_entries,
+        )
+        result = run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+        result["evidence_note"] = "Legacy Airflow deployed config filesystem evidence."
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def legacy_airflow_task_log_list(
+    alias: str,
+    dag_id: str,
+    task_id: str | None = None,
+    max_entries: int = 100,
+) -> dict[str, object]:
+    """List old Airflow task log files by DAG/task id without Airflow CLI."""
+
+    cfg, host = _host(ActionClass.SSH_READ, alias)
+    try:
+        command = build_legacy_airflow_log_list_command(
+            cfg.legacy_airflow_logs_dir,
+            dag_id,
+            task_id=task_id,
+            max_entries=max_entries,
+        )
+        result = run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+        result["evidence_note"] = (
+            "Legacy Airflow log freshness evidence only; use a bounded log tail for "
+            "runtime error details."
+        )
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def legacy_airflow_task_log_tail(
+    alias: str,
+    path: str,
+    tail_lines: int = 200,
+    approved_sensitive: bool = False,
+) -> dict[str, object]:
+    """Tail one old Airflow task log path under the configured legacy logs directory."""
+
+    cfg, host = _host(ActionClass.SSH_READ, alias)
+    try:
+        command = build_legacy_airflow_log_tail_command(
+            cfg.legacy_airflow_logs_dir,
+            path,
+            tail_lines=tail_lines,
+            approved_sensitive=approved_sensitive,
+        )
+        result = run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+        result["evidence_note"] = "Bounded legacy Airflow task-log tail."
+        return result
     except RuntimeAccessError as exc:
         raise ToolError(str(exc)) from exc
 

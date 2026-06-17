@@ -20,6 +20,8 @@ class RuntimeAccessError(ValueError):
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@+~/=-]{1,300}$")
 AIRFLOW_STATE_RE = re.compile(r"^(success|failed)$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.@:+-]{1,200}$")
+PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.:@+=-]{1,300}$")
+RELATIVE_PATH_RE = re.compile(r"^[A-Za-z0-9_.:@+=/-]{0,1000}$")
 REMOTE_PATH_RE = re.compile(r"^[^\x00\r\n]{1,1000}$")
 SENSITIVE_PATH_RE = re.compile(
     r"(?i)(^|/)(\.ssh|id_rsa|id_dsa|id_ecdsa|id_ed25519|\.pgpass|\.my\.cnf|"
@@ -39,6 +41,7 @@ DEFAULT_ALLOWED: dict[HostProfile, set[ActionClass]] = {
     },
     HostProfile.AIRFLOW_PROD: {ActionClass.SSH_READ, ActionClass.AIRFLOW_READ},
     HostProfile.AIRFLOW_PROD_LIKE: {ActionClass.SSH_READ, ActionClass.AIRFLOW_READ},
+    HostProfile.LEGACY_AIRFLOW_FS_ONLY: {ActionClass.SSH_READ},
     HostProfile.DB_DEV: {ActionClass.SSH_READ},
     HostProfile.UNKNOWN: {ActionClass.SSH_READ},
 }
@@ -48,6 +51,7 @@ APPROVAL_ALLOWED: dict[HostProfile, set[ActionClass]] = {
     HostProfile.AIRFLOW_DEV: {ActionClass.HOST_CHANGE},
     HostProfile.AIRFLOW_PROD: {ActionClass.AIRFLOW_CONTROL, ActionClass.HOST_CHANGE},
     HostProfile.AIRFLOW_PROD_LIKE: {ActionClass.AIRFLOW_CONTROL, ActionClass.HOST_CHANGE},
+    HostProfile.LEGACY_AIRFLOW_FS_ONLY: {ActionClass.HOST_CHANGE},
     HostProfile.DB_DEV: {ActionClass.HOST_CHANGE},
     HostProfile.UNKNOWN: set(),
 }
@@ -58,6 +62,12 @@ AIRFLOW_PROFILES = {
     HostProfile.AIRFLOW_PROD,
     HostProfile.AIRFLOW_PROD_LIKE,
 }
+
+LEGACY_AIRFLOW_FS_ONLY_MESSAGE = (
+    "Airflow CLI tools are unavailable for profile legacy_airflow_fs_only. "
+    "Use legacy Airflow filesystem/log tools for read-only evidence, or configure "
+    "a separate host profile with non-interactive sudo/login access to the Airflow OS user."
+)
 
 
 def validate_identifier(name: str, value: str) -> str:
@@ -85,6 +95,27 @@ def validate_task_state(value: str) -> str:
 def validate_service_name(value: str) -> str:
     if not isinstance(value, str) or not SERVICE_RE.match(value):
         raise RuntimeAccessError("service must be a systemd-safe service name.")
+    return value
+
+
+def validate_path_component(name: str, value: str) -> str:
+    if not isinstance(value, str) or not PATH_COMPONENT_RE.match(value):
+        raise RuntimeAccessError(f"{name} must be a safe single path component.")
+    if value in {".", ".."}:
+        raise RuntimeAccessError(f"{name} must not be '.' or '..'.")
+    return value
+
+
+def validate_relative_path(name: str, value: str | None) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or not RELATIVE_PATH_RE.match(value):
+        raise RuntimeAccessError(f"{name} must be a safe relative path.")
+    if value.startswith("/") or "//" in value:
+        raise RuntimeAccessError(f"{name} must be relative and normalized.")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeAccessError(f"{name} must not contain empty, '.', or '..' segments.")
     return value
 
 
@@ -135,6 +166,11 @@ def validate_approved_command(command: str) -> str:
 
 
 def ensure_action_allowed(host: SshHostConfig, action: ActionClass, approved: bool = False) -> None:
+    if (
+        host.profile == HostProfile.LEGACY_AIRFLOW_FS_ONLY
+        and action in {ActionClass.AIRFLOW_READ, ActionClass.AIRFLOW_CONTROL}
+    ):
+        raise RuntimeAccessError(LEGACY_AIRFLOW_FS_ONLY_MESSAGE)
     if action in DEFAULT_ALLOWED.get(host.profile, set()):
         return
     if approved and action in APPROVAL_ALLOWED.get(host.profile, set()):
