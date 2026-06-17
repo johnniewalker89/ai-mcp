@@ -1,0 +1,25 @@
+[project]
+name = "mcp-ssh-runtime"
+version = "0.1.0"
+description = "MCP server for controlled SSH runtime and Airflow evidence."
+requires-python = ">=3.10"
+dependencies = [
+  "fastmcp>=2.0.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+mcp-ssh-runtime = "mcp_ssh_runtime.main:main"
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_ssh_runtime"]
+
+[tool.ruff]
+line-length = 100
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
