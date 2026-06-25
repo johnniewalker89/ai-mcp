@@ -3,6 +3,7 @@ from mcp_ssh_runtime.airflow_commands import (
     airflow_pause_args,
     airflow_trigger_dag_args,
     build_airflow_command,
+    filter_airflow_dags_stdout,
 )
 from mcp_ssh_runtime.mcp_env import SSHRuntimeConfig
 
@@ -41,3 +42,45 @@ def test_list_runs_uses_positional_dag_id() -> None:
 
 def test_pause_uses_yes_to_avoid_prompt() -> None:
     assert airflow_pause_args("example_dag") == ["dags", "pause", "example_dag", "--yes"]
+
+
+def test_filter_airflow_dags_json_limits_and_filters() -> None:
+    stdout = (
+        '[{"dag_id": "mkt_main_cube"}, {"dag_id": "ods_daily"}, '
+        '{"dag_id": "mkt_costs"}]'
+    )
+
+    filtered, metadata = filter_airflow_dags_stdout(
+        stdout,
+        output="json",
+        dag_id_contains="mkt",
+        limit=1,
+    )
+
+    assert filtered == '[\n  {\n    "dag_id": "mkt_main_cube"\n  }\n]\n'
+    assert metadata["matched_count"] == 2
+    assert metadata["returned_count"] == 1
+
+
+def test_filter_airflow_dags_table_keeps_header() -> None:
+    stdout = (
+        "dag_id        | fileloc\n"
+        "==============+========\n"
+        "mkt_main_cube | /dags/mkt.py\n"
+        "ods_daily     | /dags/ods.py\n"
+    )
+
+    filtered, metadata = filter_airflow_dags_stdout(
+        stdout,
+        output="table",
+        dag_id_contains="mkt",
+        limit=10,
+    )
+
+    assert filtered == (
+        "dag_id        | fileloc\n"
+        "==============+========\n"
+        "mkt_main_cube | /dags/mkt.py\n"
+    )
+    assert metadata["matched_count"] == 1
+    assert metadata["returned_count"] == 1

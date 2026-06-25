@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from typing import Any
 
 from mcp_ssh_runtime.mcp_env import SSHRuntimeConfig
 from mcp_ssh_runtime.policy import RuntimeAccessError, validate_identifier
@@ -97,6 +98,97 @@ def output_arg(output: str) -> list[str]:
     if output not in {"table", "json", "yaml", "plain"}:
         raise RuntimeAccessError("output must be one of: table, json, yaml, plain.")
     return ["-o", output]
+
+
+def validate_optional_dag_filter(value: str | None) -> str | None:
+    if value is None or value == "":
+        return None
+    return validate_identifier("dag_id_contains", value)
+
+
+def validate_optional_limit(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or value < 1 or value > 5000:
+        raise RuntimeAccessError("limit must be between 1 and 5000, or null for no limit.")
+    return value
+
+
+def filter_airflow_dags_stdout(
+    stdout: str,
+    output: str,
+    dag_id_contains: str | None,
+    limit: int | None,
+) -> tuple[str, dict[str, object]]:
+    checked_filter = validate_optional_dag_filter(dag_id_contains)
+    checked_limit = validate_optional_limit(limit)
+    if checked_filter is None and checked_limit is None:
+        return stdout, {"filtered": False}
+    if output == "json":
+        return _filter_airflow_dags_json(stdout, checked_filter, checked_limit)
+    return _filter_airflow_dags_lines(stdout, checked_filter, checked_limit)
+
+
+def _dag_row_matches(row: Any, dag_id_contains: str | None) -> bool:
+    if dag_id_contains is None:
+        return True
+    if isinstance(row, dict):
+        return dag_id_contains in str(row.get("dag_id", ""))
+    return dag_id_contains in str(row)
+
+
+def _filter_airflow_dags_json(
+    stdout: str,
+    dag_id_contains: str | None,
+    limit: int | None,
+) -> tuple[str, dict[str, object]]:
+    try:
+        decoded = json.loads(stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeAccessError(f"airflow_dags_list returned invalid JSON: {exc}") from exc
+    if not isinstance(decoded, list):
+        raise RuntimeAccessError("airflow_dags_list JSON output must be a list.")
+
+    matched = [row for row in decoded if _dag_row_matches(row, dag_id_contains)]
+    returned = matched[:limit] if limit is not None else matched
+    metadata = {
+        "filtered": True,
+        "matched_count": len(matched),
+        "returned_count": len(returned),
+        "limit": limit,
+        "dag_id_contains": dag_id_contains,
+    }
+    return json.dumps(returned, ensure_ascii=False, indent=2) + "\n", metadata
+
+
+def _split_table_header(lines: list[str]) -> tuple[list[str], list[str]]:
+    if len(lines) >= 2 and "dag_id" in lines[0] and set(lines[1].replace("+", "").strip()) <= {"="}:
+        return lines[:2], lines[2:]
+    return [], lines
+
+
+def _filter_airflow_dags_lines(
+    stdout: str,
+    dag_id_contains: str | None,
+    limit: int | None,
+) -> tuple[str, dict[str, object]]:
+    had_trailing_newline = stdout.endswith("\n")
+    lines = stdout.splitlines()
+    header, body = _split_table_header(lines)
+    matched = [line for line in body if dag_id_contains is None or dag_id_contains in line]
+    returned = matched[:limit] if limit is not None else matched
+    result_lines = [*header, *returned]
+    result = "\n".join(result_lines)
+    if result and had_trailing_newline:
+        result += "\n"
+    metadata = {
+        "filtered": True,
+        "matched_count": len(matched),
+        "returned_count": len(returned),
+        "limit": limit,
+        "dag_id_contains": dag_id_contains,
+    }
+    return result, metadata
 
 
 def airflow_version_args() -> list[str]:

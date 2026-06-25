@@ -10,8 +10,9 @@
 - `mcp-clickhouse` — MCP-сервер ClickHouse с tools для метаданных и запросов,
   опциональным write/drop доступом и async-управлением долгими sandbox writes.
 - `mcp-ssh-runtime` — MCP-сервер SSH runtime с tools для read-only
-  SSH/Airflow/file/service/process evidence, approval-gated Airflow control,
-  approval-gated host changes и host-profile policy.
+  SSH/Airflow/file/service/process evidence, bounded Airflow DAG discovery,
+  approval-gated Airflow control, approval-gated host changes и host-profile
+  policy.
 
 ## Пример установки
 
@@ -54,6 +55,17 @@ args = [
 [mcp_servers.ssh_runtime.env]
 SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=legacy_airflow_fs_only,GP-dev=db_dev"
 ```
+
+Для Codex можно дополнительно поставить `approval_mode = "approve"` на
+read-only tools `ssh_runtime` (`ssh_check`, file/service/process reads,
+legacy Airflow read tools, Airflow read tools), чтобы приложение не спрашивало
+подтверждение на каждое безопасное чтение. Не auto-approve
+`airflow_control`, `service_restart`, `run_approved_command` и sensitive file
+reads без отдельного решения.
+
+Для больших Airflow-контуров используйте `airflow_dags_list` с
+`dag_id_contains` и/или `limit`. По умолчанию tool возвращает не больше 200 DAG,
+чтобы не забивать контекст MCP-клиента.
 
 Credentials и настройки конкретного хоста должны жить только в локальном
 конфиге MCP-клиента.

@@ -23,6 +23,7 @@ from mcp_ssh_runtime.airflow_commands import (
     airflow_version_args,
     build_airflow_command,
     build_airflow_python_command,
+    filter_airflow_dags_stdout,
 )
 from mcp_ssh_runtime.mcp_env import (
     SSHRuntimeConfig,
@@ -419,10 +420,26 @@ def airflow_list_import_errors(alias: str, output: str = "json") -> dict[str, ob
 
 
 @mcp.tool()
-def airflow_dags_list(alias: str, output: str = "json") -> dict[str, object]:
-    """List Airflow DAGs."""
+def airflow_dags_list(
+    alias: str,
+    output: str = "json",
+    dag_id_contains: str | None = None,
+    limit: int | None = 200,
+) -> dict[str, object]:
+    """List Airflow DAGs with optional bounded client-side filtering."""
 
-    return _run_airflow(alias, airflow_dags_list_args(output), ActionClass.AIRFLOW_READ)
+    try:
+        result = _run_airflow(alias, airflow_dags_list_args(output), ActionClass.AIRFLOW_READ)
+        result["stdout"], metadata = filter_airflow_dags_stdout(
+            str(result["stdout"]),
+            output,
+            dag_id_contains,
+            limit,
+        )
+        result["filter"] = metadata
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @mcp.tool()

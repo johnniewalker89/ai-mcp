@@ -27,7 +27,7 @@ tool exists only for explicit approval cases.
 - `legacy_airflow_task_log_tail`
 - `airflow_version`
 - `airflow_list_import_errors`
-- `airflow_dags_list`
+- `airflow_dags_list` (`dag_id_contains` and `limit` keep large DAG lists bounded)
 - `airflow_tasks_list`
 - `airflow_dag_runs`
 - `airflow_task_states`
@@ -88,6 +88,12 @@ Default Airflow values:
 
 Override them in the local MCP client config if a host differs.
 
+`airflow_dags_list` is bounded by default (`limit=200`) to avoid flooding the
+MCP client context on large Airflow installations. Use `dag_id_contains` for
+normal DAG discovery, for example `dag_id_contains="mkt"` or
+`dag_id_contains="main_cube"`. Pass `limit=null` only when the caller
+intentionally needs the full list.
+
 For legacy Airflow hosts without non-interactive sudo/login access to the
 Airflow OS user, use `legacy_airflow_fs_only` and the legacy filesystem/log
 tools instead of typed Airflow CLI tools:
@@ -116,6 +122,62 @@ SSH_RUNTIME_MAX_OUTPUT_CHARS = "200000"
 SSH_RUNTIME_AIRFLOW_OS_USER = "airflow"
 SSH_RUNTIME_AIRFLOW_WORKDIR = "/opt/airflow/airflow"
 SSH_RUNTIME_AIRFLOW_PYENV_VERSION = "airflow_3.12.11"
+
+# Optional Codex client policy: avoid prompting for every read-only evidence tool.
+# Keep control/change/sensitive actions prompt-gated.
+[mcp_servers.ssh_runtime.tools.list_configured_hosts]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.ssh_check]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.file_stat]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.file_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.file_read]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.service_status]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.service_logs]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.process_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.legacy_airflow_dag_file]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.legacy_airflow_config_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.legacy_airflow_task_log_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.legacy_airflow_task_log_tail]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_version]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_list_import_errors]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_dags_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_tasks_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_dag_runs]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_task_states]
+approval_mode = "approve"
 ```
 
 Host aliases must be configured in the local SSH config. Keep secrets, private
