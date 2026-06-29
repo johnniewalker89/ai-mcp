@@ -143,6 +143,10 @@ class SSHRuntimeConfig:
         return os.getenv("SSH_RUNTIME_AIRFLOW_PATH", default_path)
 
     @property
+    def airflow_logs_dir(self) -> str:
+        return os.getenv("SSH_RUNTIME_AIRFLOW_LOGS_DIR", "/opt/airflow/airflow/logs")
+
+    @property
     def legacy_airflow_autogen_dir(self) -> str:
         return os.getenv(
             "SSH_RUNTIME_LEGACY_AIRFLOW_AUTOGEN_DIR",

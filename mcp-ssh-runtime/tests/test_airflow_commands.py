@@ -1,11 +1,17 @@
+import pytest
+
 from mcp_ssh_runtime.airflow_commands import (
     airflow_dag_runs_args,
     airflow_pause_args,
+    airflow_task_log_list_command,
+    airflow_task_log_tail_command,
     airflow_trigger_dag_args,
     build_airflow_command,
+    build_airflow_shell_command,
     filter_airflow_dags_stdout,
 )
 from mcp_ssh_runtime.mcp_env import SSHRuntimeConfig
+from mcp_ssh_runtime.policy import RuntimeAccessError
 
 
 def test_airflow_command_uses_airflow_os_user(monkeypatch) -> None:
@@ -18,6 +24,18 @@ def test_airflow_command_uses_airflow_os_user(monkeypatch) -> None:
 
     assert "cd /opt/airflow/airflow && sudo -n -u airflow -- env" in command
     assert " airflow version" in command
+
+
+def test_airflow_shell_command_uses_airflow_os_user(monkeypatch) -> None:
+    monkeypatch.setenv("SSH_RUNTIME_HOST_PROFILES", "AF-dev=airflow_dev")
+    monkeypatch.setenv("SSH_RUNTIME_AIRFLOW_OS_USER", "airflow")
+    monkeypatch.setenv("SSH_RUNTIME_AIRFLOW_WORKDIR", "/opt/airflow/airflow")
+    cfg = SSHRuntimeConfig()
+
+    command = build_airflow_shell_command(cfg, "find /opt/airflow/airflow/logs -type f")
+
+    assert "cd /opt/airflow/airflow && sudo -n -u airflow -- env" in command
+    assert " sh -c " in command
 
 
 def test_trigger_dag_args_are_typed_and_json_safe() -> None:
@@ -42,6 +60,30 @@ def test_list_runs_uses_positional_dag_id() -> None:
 
 def test_pause_uses_yes_to_avoid_prompt() -> None:
     assert airflow_pause_args("example_dag") == ["dags", "pause", "example_dag", "--yes"]
+
+
+def test_airflow_task_log_list_uses_modern_airflow_log_shape() -> None:
+    command = airflow_task_log_list_command(
+        "/opt/airflow/airflow/logs",
+        "mkt_main_cube",
+        task_id="mart__greenplum__mkt_il_fact_costs",
+        run_id="scheduled__2026-06-24T01:30:00+00:00",
+        max_entries=10,
+    )
+
+    assert "find /opt/airflow/airflow/logs -type f" in command
+    assert "*/dag_id=mkt_main_cube/*" in command
+    assert "*/task_id=mart__greenplum__mkt_il_fact_costs/*" in command
+    assert "*/run_id=scheduled__2026-06-24T01:30:00+00:00/*" in command
+    assert "head -n 10" in command
+
+
+def test_airflow_task_log_tail_must_stay_under_logs_dir() -> None:
+    with pytest.raises(RuntimeAccessError):
+        airflow_task_log_tail_command(
+            "/opt/airflow/airflow/logs",
+            "/opt/airflow/airflow/dags/autogen/mkt_main_cube.py",
+        )
 
 
 def test_filter_airflow_dags_json_limits_and_filters() -> None:

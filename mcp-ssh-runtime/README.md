@@ -31,6 +31,8 @@ tool exists only for explicit approval cases.
 - `airflow_tasks_list`
 - `airflow_dag_runs`
 - `airflow_task_states`
+- `airflow_task_log_list`
+- `airflow_task_log_tail`
 - `airflow_trigger_dag`
 - `airflow_clear_tasks`
 - `airflow_pause_dag`
@@ -85,6 +87,7 @@ Default Airflow values:
 - `SSH_RUNTIME_AIRFLOW_WORKDIR=/opt/airflow/airflow`
 - `SSH_RUNTIME_AIRFLOW_PYENV_ROOT=/opt/airflow/.pyenv`
 - `SSH_RUNTIME_AIRFLOW_PYENV_VERSION=airflow_3.12.11`
+- `SSH_RUNTIME_AIRFLOW_LOGS_DIR=/opt/airflow/airflow/logs`
 
 Override them in the local MCP client config if a host differs.
 
@@ -93,6 +96,11 @@ MCP client context on large Airflow installations. Use `dag_id_contains` for
 normal DAG discovery, for example `dag_id_contains="mkt"` or
 `dag_id_contains="main_cube"`. Pass `limit=null` only when the caller
 intentionally needs the full list.
+
+Use `airflow_task_log_list` and `airflow_task_log_tail` for Airflow 3 task logs
+on `airflow_dev`, `airflow_prod`, and `airflow_prod_like` profiles. These tools
+read modern Airflow task log paths under `SSH_RUNTIME_AIRFLOW_LOGS_DIR` as the
+Airflow OS user. Do not use `legacy_airflow_task_log_*` for Airflow 3 hosts.
 
 For legacy Airflow hosts without non-interactive sudo/login access to the
 Airflow OS user, use `legacy_airflow_fs_only` and the legacy filesystem/log
@@ -122,6 +130,7 @@ SSH_RUNTIME_MAX_OUTPUT_CHARS = "200000"
 SSH_RUNTIME_AIRFLOW_OS_USER = "airflow"
 SSH_RUNTIME_AIRFLOW_WORKDIR = "/opt/airflow/airflow"
 SSH_RUNTIME_AIRFLOW_PYENV_VERSION = "airflow_3.12.11"
+SSH_RUNTIME_AIRFLOW_LOGS_DIR = "/opt/airflow/airflow/logs"
 
 # Optional Codex client policy: avoid prompting for every read-only evidence tool.
 # Keep control/change/sensitive actions prompt-gated.
@@ -177,6 +186,12 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers.ssh_runtime.tools.airflow_task_states]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_task_log_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.airflow_task_log_tail]
 approval_mode = "approve"
 ```
 

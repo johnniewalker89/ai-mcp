@@ -5,7 +5,13 @@ import shlex
 from typing import Any
 
 from mcp_ssh_runtime.mcp_env import SSHRuntimeConfig
-from mcp_ssh_runtime.policy import RuntimeAccessError, validate_identifier
+from mcp_ssh_runtime.policy import (
+    RuntimeAccessError,
+    ensure_file_read_allowed,
+    validate_identifier,
+    validate_line_limit,
+    validate_remote_path,
+)
 
 
 MARK_TASK_STATE_SCRIPT = r"""
@@ -80,6 +86,36 @@ def build_airflow_python_command(cfg: SSHRuntimeConfig, script: str, args: list[
         *args,
     ]
     return shell_join(command[:1]) + " " + shell_join(command[1:2]) + " && " + shell_join(command[3:])
+
+
+def build_airflow_shell_command(cfg: SSHRuntimeConfig, shell_command: str) -> str:
+    command = [
+        "cd",
+        cfg.airflow_workdir,
+        "&&",
+        "sudo",
+        "-n",
+        "-u",
+        cfg.airflow_os_user,
+        "--",
+        "env",
+        *_airflow_env_args(cfg),
+        "sh",
+        "-c",
+        shell_command,
+    ]
+    return shell_join(command[:1]) + " " + shell_join(command[1:2]) + " && " + shell_join(command[3:])
+
+
+def _ensure_under_base(base: str, path: str) -> str:
+    validate_remote_path("base", base)
+    validate_remote_path("path", path)
+    normalized_base = base.rstrip("/") + "/"
+    if "/../" in path or path.endswith("/.."):
+        raise RuntimeAccessError("path must not contain '..' segments.")
+    if not path.startswith(normalized_base):
+        raise RuntimeAccessError(f"path must be under {base}.")
+    return path
 
 
 def checked_json_object(value: str | None) -> str | None:
@@ -222,6 +258,43 @@ def airflow_task_states_args(dag_id: str, run_id: str, output: str) -> list[str]
         validate_identifier("dag_id", dag_id),
         validate_identifier("run_id", run_id),
     ]
+
+
+def airflow_task_log_list_command(
+    logs_dir: str,
+    dag_id: str,
+    task_id: str | None = None,
+    run_id: str | None = None,
+    max_entries: int = 100,
+) -> str:
+    checked_dag_id = validate_identifier("dag_id", dag_id)
+    checked_task_id = validate_identifier("task_id", task_id) if task_id else None
+    checked_run_id = validate_identifier("run_id", run_id) if run_id else None
+    validate_line_limit(max_entries, name="max_entries", minimum=1, maximum=2000)
+    validate_remote_path("logs_dir", logs_dir)
+
+    path_filters = [f"-path {shlex.quote(f'*/dag_id={checked_dag_id}/*')}"]
+    if checked_task_id:
+        path_filters.append(f"-path {shlex.quote(f'*/task_id={checked_task_id}/*')}")
+    if checked_run_id:
+        path_filters.append(f"-path {shlex.quote(f'*/run_id={checked_run_id}/*')}")
+    return (
+        f"find {shlex.quote(logs_dir)} -type f {' '.join(path_filters)} "
+        "-printf '%T@ %TY-%Tm-%Td %TH:%TM %s %p\\n' "
+        f"| sort -rn | head -n {max_entries}"
+    )
+
+
+def airflow_task_log_tail_command(
+    logs_dir: str,
+    path: str,
+    tail_lines: int = 200,
+    approved_sensitive: bool = False,
+) -> str:
+    checked_path = _ensure_under_base(logs_dir, path)
+    ensure_file_read_allowed(checked_path, approved_sensitive=approved_sensitive)
+    lines = validate_line_limit(tail_lines, name="tail_lines", maximum=2000)
+    return f"tail -n {lines} -- {shlex.quote(checked_path)}"
 
 
 def airflow_trigger_dag_args(

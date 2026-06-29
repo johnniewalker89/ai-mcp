@@ -16,6 +16,8 @@ from mcp_ssh_runtime.airflow_commands import (
     airflow_dags_list_args,
     airflow_list_import_errors_args,
     airflow_pause_args,
+    airflow_task_log_list_command,
+    airflow_task_log_tail_command,
     airflow_task_states_args,
     airflow_tasks_list_args,
     airflow_trigger_dag_args,
@@ -23,6 +25,7 @@ from mcp_ssh_runtime.airflow_commands import (
     airflow_version_args,
     build_airflow_command,
     build_airflow_python_command,
+    build_airflow_shell_command,
     filter_airflow_dags_stdout,
 )
 from mcp_ssh_runtime.mcp_env import (
@@ -284,7 +287,7 @@ def legacy_airflow_dag_file(
     dag_id: str,
     head_lines: int = 80,
 ) -> dict[str, object]:
-    """Read old Airflow deployed autogen DAG file metadata and header without Airflow CLI."""
+    """Read old Airflow/Pentaho autogen DAG file metadata; do not use for Airflow 3."""
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
@@ -310,7 +313,7 @@ def legacy_airflow_config_list(
     max_depth: int = 2,
     max_entries: int = 200,
 ) -> dict[str, object]:
-    """List old Airflow deployed yml/config files without Airflow CLI."""
+    """List old Airflow/Pentaho deployed yml/config files; do not use for Airflow 3."""
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
@@ -334,7 +337,7 @@ def legacy_airflow_task_log_list(
     task_id: str | None = None,
     max_entries: int = 100,
 ) -> dict[str, object]:
-    """List old Airflow task log files by DAG/task id without Airflow CLI."""
+    """List old Airflow/Pentaho task log files; do not use for Airflow 3 profiles."""
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
@@ -361,7 +364,7 @@ def legacy_airflow_task_log_tail(
     tail_lines: int = 200,
     approved_sensitive: bool = False,
 ) -> dict[str, object]:
-    """Tail one old Airflow task log path under the configured legacy logs directory."""
+    """Tail one old Airflow/Pentaho task log path; do not use for Airflow 3 profiles."""
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
@@ -466,6 +469,60 @@ def airflow_task_states(alias: str, dag_id: str, run_id: str, output: str = "jso
     """List task instance states for an Airflow DAG run."""
 
     return _run_airflow(alias, airflow_task_states_args(dag_id, run_id, output), ActionClass.AIRFLOW_READ)
+
+
+@mcp.tool()
+def airflow_task_log_list(
+    alias: str,
+    dag_id: str,
+    task_id: str | None = None,
+    run_id: str | None = None,
+    max_entries: int = 100,
+) -> dict[str, object]:
+    """List Airflow 3 task log files by DAG/task/run id under the Airflow OS user."""
+
+    cfg, host = _host(ActionClass.AIRFLOW_READ, alias)
+    try:
+        ensure_airflow_host(host)
+        shell_command = airflow_task_log_list_command(
+            cfg.airflow_logs_dir,
+            dag_id,
+            task_id=task_id,
+            run_id=run_id,
+            max_entries=max_entries,
+        )
+        command = build_airflow_shell_command(cfg, shell_command)
+        result = run_remote_command(cfg, host, ActionClass.AIRFLOW_READ, command).to_dict()
+        result["evidence_note"] = "Airflow 3 task-log filesystem evidence under Airflow OS user."
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def airflow_task_log_tail(
+    alias: str,
+    path: str,
+    tail_lines: int = 200,
+    approved_sensitive: bool = False,
+) -> dict[str, object]:
+    """Tail one Airflow 3 task log path under the configured Airflow logs directory."""
+
+    cfg, host = _host(ActionClass.AIRFLOW_READ, alias)
+    try:
+        ensure_airflow_host(host)
+        shell_command = airflow_task_log_tail_command(
+            cfg.airflow_logs_dir,
+            path,
+            tail_lines=tail_lines,
+            approved_sensitive=approved_sensitive,
+        )
+        command = build_airflow_shell_command(cfg, shell_command)
+        result = run_remote_command(cfg, host, ActionClass.AIRFLOW_READ, command).to_dict()
+        result["evidence_note"] = "Bounded Airflow 3 task-log tail under Airflow OS user."
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @mcp.tool()

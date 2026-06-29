@@ -11,8 +11,8 @@
   опциональным write/drop доступом и async-управлением долгими sandbox writes.
 - `mcp-ssh-runtime` — MCP-сервер SSH runtime с tools для read-only
   SSH/Airflow/file/service/process evidence, bounded Airflow DAG discovery,
-  approval-gated Airflow control, approval-gated host changes и host-profile
-  policy.
+  Airflow 3 task-log reads, approval-gated Airflow control, approval-gated host
+  changes и host-profile policy.
 
 ## Пример установки
 
@@ -66,6 +66,10 @@ reads без отдельного решения.
 Для больших Airflow-контуров используйте `airflow_dags_list` с
 `dag_id_contains` и/или `limit`. По умолчанию tool возвращает не больше 200 DAG,
 чтобы не забивать контекст MCP-клиента.
+
+Для логов Airflow 3 используйте `airflow_task_log_list` и
+`airflow_task_log_tail`. `legacy_airflow_task_log_*` предназначены только для
+старого `legacy_airflow_fs_only` контура.
 
 Credentials и настройки конкретного хоста должны жить только в локальном
 конфиге MCP-клиента.
