@@ -40,6 +40,7 @@ from mcp_ssh_runtime.policy import (
     RuntimeAccessError,
     ensure_action_allowed,
     ensure_airflow_host,
+    ensure_legacy_airflow_host,
     validate_identifier,
     validate_task_state,
 )
@@ -291,6 +292,7 @@ def legacy_airflow_dag_file(
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
+        ensure_legacy_airflow_host(host)
         command = build_legacy_airflow_dag_file_command(
             cfg.legacy_airflow_autogen_dir,
             dag_id,
@@ -317,6 +319,7 @@ def legacy_airflow_config_list(
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
+        ensure_legacy_airflow_host(host)
         command = build_legacy_airflow_config_list_command(
             cfg.legacy_airflow_yml_dir,
             relative_path=relative_path,
@@ -341,6 +344,7 @@ def legacy_airflow_task_log_list(
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
+        ensure_legacy_airflow_host(host)
         command = build_legacy_airflow_log_list_command(
             cfg.legacy_airflow_logs_dir,
             dag_id,
@@ -368,6 +372,7 @@ def legacy_airflow_task_log_tail(
 
     cfg, host = _host(ActionClass.SSH_READ, alias)
     try:
+        ensure_legacy_airflow_host(host)
         command = build_legacy_airflow_log_tail_command(
             cfg.legacy_airflow_logs_dir,
             path,

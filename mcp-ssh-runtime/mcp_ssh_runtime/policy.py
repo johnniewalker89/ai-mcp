@@ -191,3 +191,12 @@ def ensure_airflow_host(host: SshHostConfig) -> None:
         raise RuntimeAccessError(
             f"Host profile {host.profile.value} is not an Airflow profile."
         )
+
+
+def ensure_legacy_airflow_host(host: SshHostConfig) -> None:
+    if host.profile != HostProfile.LEGACY_AIRFLOW_FS_ONLY:
+        raise RuntimeAccessError(
+            "Legacy Airflow filesystem/log tools are only allowed for profile "
+            "legacy_airflow_fs_only. Use Airflow 3 typed tools for airflow_dev, "
+            "airflow_prod, and airflow_prod_like profiles."
+        )

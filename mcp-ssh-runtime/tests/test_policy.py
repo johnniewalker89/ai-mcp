@@ -5,6 +5,7 @@ from mcp_ssh_runtime.policy import (
     ActionClass,
     RuntimeAccessError,
     ensure_action_allowed,
+    ensure_legacy_airflow_host,
     ensure_file_read_allowed,
     validate_approved_command,
 )
@@ -40,6 +41,13 @@ def test_legacy_airflow_fs_only_blocks_airflow_cli_read() -> None:
             host(HostProfile.LEGACY_AIRFLOW_FS_ONLY),
             ActionClass.AIRFLOW_READ,
         )
+
+
+def test_legacy_airflow_tools_are_old_profile_only() -> None:
+    ensure_legacy_airflow_host(host(HostProfile.LEGACY_AIRFLOW_FS_ONLY))
+
+    with pytest.raises(RuntimeAccessError, match="Legacy Airflow filesystem/log tools"):
+        ensure_legacy_airflow_host(host(HostProfile.AIRFLOW_PROD))
 
 
 def test_legacy_airflow_fs_only_allows_ssh_read_and_approved_host_change() -> None:
