@@ -52,6 +52,9 @@ Host profiles are configured locally through `SSH_RUNTIME_HOST_PROFILES`.
   Airflow CLI capability; allows `ssh_read` only by default and `host_change`
   only with `approved=true`.
 - `db_dev`: allows `ssh_read`; `host_change` needs `approved=true`.
+- `flink_dev`: allows `ssh_read`; `host_change` needs `approved=true`.
+- `flink_prod`: allows `ssh_read`; `host_change` needs `approved=true`.
+- `archive`: allows `ssh_read`; `host_change` needs `approved=true`.
 - `unknown`: allows `ssh_read` only.
 
 Default read-only DAG/runtime investigation includes bounded file
@@ -124,7 +127,7 @@ args = [
 ]
 
 [mcp_servers.ssh_runtime.env]
-SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=legacy_airflow_fs_only,GP-dev=db_dev"
+SSH_RUNTIME_HOST_PROFILES = "AF-dev=airflow_dev,AF-prod=airflow_prod,AF-old=legacy_airflow_fs_only,GP-dev=db_dev,Archive=archive,Flink-dev=flink_dev,Flink-prod-n1=flink_prod,Flink-prod-n2=flink_prod,Flink-prod-n3=flink_prod"
 SSH_RUNTIME_COMMAND_TIMEOUT = "120"
 SSH_RUNTIME_MAX_OUTPUT_CHARS = "200000"
 SSH_RUNTIME_AIRFLOW_OS_USER = "airflow"

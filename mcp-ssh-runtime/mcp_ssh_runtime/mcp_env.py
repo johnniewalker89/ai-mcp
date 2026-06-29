@@ -23,6 +23,9 @@ class HostProfile(str, Enum):
     AIRFLOW_PROD_LIKE = "airflow_prod_like"
     LEGACY_AIRFLOW_FS_ONLY = "legacy_airflow_fs_only"
     DB_DEV = "db_dev"
+    FLINK_DEV = "flink_dev"
+    FLINK_PROD = "flink_prod"
+    ARCHIVE = "archive"
     UNKNOWN = "unknown"
 
     @classmethod

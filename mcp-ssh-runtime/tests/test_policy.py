@@ -71,6 +71,31 @@ def test_db_dev_blocks_airflow_read() -> None:
         ensure_action_allowed(host(HostProfile.DB_DEV), ActionClass.AIRFLOW_READ)
 
 
+def test_flink_profiles_allow_only_ssh_read_by_default() -> None:
+    for profile in (HostProfile.FLINK_DEV, HostProfile.FLINK_PROD):
+        ensure_action_allowed(host(profile), ActionClass.SSH_READ)
+
+        with pytest.raises(RuntimeAccessError):
+            ensure_action_allowed(host(profile), ActionClass.AIRFLOW_READ)
+
+        with pytest.raises(RuntimeAccessError):
+            ensure_action_allowed(host(profile), ActionClass.HOST_CHANGE)
+
+        ensure_action_allowed(host(profile), ActionClass.HOST_CHANGE, approved=True)
+
+
+def test_archive_profile_allows_only_ssh_read_by_default() -> None:
+    ensure_action_allowed(host(HostProfile.ARCHIVE), ActionClass.SSH_READ)
+
+    with pytest.raises(RuntimeAccessError):
+        ensure_action_allowed(host(HostProfile.ARCHIVE), ActionClass.AIRFLOW_READ)
+
+    with pytest.raises(RuntimeAccessError):
+        ensure_action_allowed(host(HostProfile.ARCHIVE), ActionClass.HOST_CHANGE)
+
+    ensure_action_allowed(host(HostProfile.ARCHIVE), ActionClass.HOST_CHANGE, approved=True)
+
+
 def test_host_change_requires_approval_on_dev() -> None:
     with pytest.raises(RuntimeAccessError):
         ensure_action_allowed(host(HostProfile.AIRFLOW_DEV), ActionClass.HOST_CHANGE)

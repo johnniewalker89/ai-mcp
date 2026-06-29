@@ -43,6 +43,9 @@ DEFAULT_ALLOWED: dict[HostProfile, set[ActionClass]] = {
     HostProfile.AIRFLOW_PROD_LIKE: {ActionClass.SSH_READ, ActionClass.AIRFLOW_READ},
     HostProfile.LEGACY_AIRFLOW_FS_ONLY: {ActionClass.SSH_READ},
     HostProfile.DB_DEV: {ActionClass.SSH_READ},
+    HostProfile.FLINK_DEV: {ActionClass.SSH_READ},
+    HostProfile.FLINK_PROD: {ActionClass.SSH_READ},
+    HostProfile.ARCHIVE: {ActionClass.SSH_READ},
     HostProfile.UNKNOWN: {ActionClass.SSH_READ},
 }
 
@@ -53,6 +56,9 @@ APPROVAL_ALLOWED: dict[HostProfile, set[ActionClass]] = {
     HostProfile.AIRFLOW_PROD_LIKE: {ActionClass.AIRFLOW_CONTROL, ActionClass.HOST_CHANGE},
     HostProfile.LEGACY_AIRFLOW_FS_ONLY: {ActionClass.HOST_CHANGE},
     HostProfile.DB_DEV: {ActionClass.HOST_CHANGE},
+    HostProfile.FLINK_DEV: {ActionClass.HOST_CHANGE},
+    HostProfile.FLINK_PROD: {ActionClass.HOST_CHANGE},
+    HostProfile.ARCHIVE: {ActionClass.HOST_CHANGE},
     HostProfile.UNKNOWN: set(),
 }
 
