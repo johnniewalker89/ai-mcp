@@ -13,6 +13,9 @@
   SSH/Airflow/file/service/process evidence, bounded Airflow DAG discovery,
   Airflow 3 task-log reads, approval-gated Airflow control, approval-gated host
   changes и host-profile policy.
+- `mcp-rabbitmq` — MCP-сервер RabbitMQ Management API: read-only просмотр
+  brokers/exchanges/queues/bindings/consumers и approval-gated declare/bind/
+  purge/delete операции.
 
 ## Пример установки
 
@@ -73,3 +76,38 @@ reads без отдельного решения.
 
 Credentials и настройки конкретного хоста должны жить только в локальном
 конфиге MCP-клиента.
+
+RabbitMQ:
+
+```toml
+[mcp_servers.rabbitmq]
+command = "uvx"
+args = [
+  "--from",
+  "git+https://github.com/johnniewalker89/ai-mcp.git#subdirectory=mcp-rabbitmq",
+  "mcp-rabbitmq"
+]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.rabbitmq.env]
+RABBITMQ_MCP_ENV_FILE = "C:\\Users\\Admin\\.codex\\rabbitmq-mcp.env"
+```
+
+В локальном env-файле:
+
+```dotenv
+RABBITMQ_MCP_ALIASES=dev,prod
+RABBITMQ_MCP_DEV_URL=http://rabbit-shot-1.x340.org:15672
+RABBITMQ_MCP_DEV_PROFILE=dev
+RABBITMQ_MCP_DEV_USERNAME=<local only>
+RABBITMQ_MCP_DEV_PASSWORD=<local only>
+RABBITMQ_MCP_PROD_URL=http://bi-rabbitmq81.x340.org:15672
+RABBITMQ_MCP_PROD_PROFILE=prod
+RABBITMQ_MCP_PROD_USERNAME=<local only>
+RABBITMQ_MCP_PROD_PASSWORD=<local only>
+```
+
+Для Codex можно поставить `approval_mode = "approve"` только на read-only
+RabbitMQ tools. Не auto-approve `declare_exchange`, `declare_queue`,
+`bind_queue`, `purge_queue`, `delete_queue`; сами tools дополнительно требуют
+`approved=true`.

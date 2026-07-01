@@ -1,0 +1,25 @@
+[project]
+name = "mcp-rabbitmq"
+version = "0.1.0"
+description = "Read-only MCP server for RabbitMQ Management API evidence."
+requires-python = ">=3.10"
+dependencies = [
+  "fastmcp>=2.0.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+mcp-rabbitmq = "mcp_rabbitmq.main:main"
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_rabbitmq"]
+
+[tool.ruff]
+line-length = 100
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
