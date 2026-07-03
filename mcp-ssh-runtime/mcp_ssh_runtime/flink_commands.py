@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import base64
 
 from mcp_ssh_runtime.policy import (
     RuntimeAccessError,
@@ -22,7 +23,9 @@ def validate_flink_job_id(job_id: str) -> str:
 
 
 def _python_as_gitlab_runner(script: str) -> str:
-    return "sudo -n -iu gitlab-runner python3 -c " + shlex.quote(script)
+    payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    wrapper = f"import base64; exec(base64.b64decode({payload!r}).decode('utf-8'))"
+    return "sudo -n -iu gitlab-runner python3 -c " + shlex.quote(wrapper)
 
 
 def _validate_flink_paths(

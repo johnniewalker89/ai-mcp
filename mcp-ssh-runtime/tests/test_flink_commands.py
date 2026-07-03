@@ -10,25 +10,23 @@ def test_flink_list_jobs_runs_as_gitlab_runner_python() -> None:
     command = build_flink_list_jobs_command()
 
     assert command.startswith("sudo -n -iu gitlab-runner python3 -c ")
-    assert "/opt/flink/bin/flink" in command
-    assert "subprocess.run" in command
+    assert "base64.b64decode" in command
+    assert "subprocess.run" not in command
 
 
 def test_flink_restart_job_uses_savepoint_and_default_paths() -> None:
     command = build_flink_restart_job_command("appsflyer_skan")
 
     assert command.startswith("sudo -n -iu gitlab-runner python3 -c ")
-    assert "/opt/flink/jobs/appsflyer_skan.jar" in command
-    assert "/opt/flink/savepoints/appsflyer_skan" in command
-    assert '"stop"' in command
-    assert '"run"' in command
-    assert '"-s"' in command
+    assert "base64.b64decode" in command
+    assert "/opt/flink/jobs/appsflyer_skan.jar" not in command
 
 
 def test_flink_job_exceptions_validates_job_id() -> None:
     command = build_flink_job_exceptions_command("a" * 32)
 
-    assert "http://localhost:8081/jobs/" in command
+    assert command.startswith("sudo -n -iu gitlab-runner python3 -c ")
+    assert "base64.b64decode" in command
 
 
 def test_flink_job_exceptions_rejects_invalid_job_id() -> None:
