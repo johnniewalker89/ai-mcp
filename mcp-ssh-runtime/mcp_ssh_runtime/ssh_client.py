@@ -9,9 +9,17 @@ from mcp_ssh_runtime.policy import ActionClass
 
 
 SECRET_PATTERNS = [
-    re.compile(r"(?i)(password|passwd|pwd|token|secret|key)\s*=\s*[^,\s]+"),
-    re.compile(r'(?i)"(password|passwd|token|secret|key)"\s*:\s*"[^"]*"'),
-    re.compile(r"(?i)'(password|passwd|token|secret|key)'\s*:\s*'[^']*'"),
+    re.compile(
+        r"(?i)(^|[\s,{;])"
+        r"([A-Za-z0-9_.-]*(?:password|passwd|pass|pwd|token|secret|private[_-]?key)[A-Za-z0-9_.-]*)"
+        r"\s*=\s*[^,\s;]+"
+    ),
+    re.compile(
+        r'(?i)"([^"]*(?:password|passwd|pass|pwd|token|secret|private[_-]?key)[^"]*)"\s*:\s*"[^"]*"'
+    ),
+    re.compile(
+        r"(?i)'([^']*(?:password|passwd|pass|pwd|token|secret|private[_-]?key)[^']*)'\s*:\s*'[^']*'"
+    ),
 ]
 
 
@@ -34,7 +42,10 @@ class CommandResult:
 def redact_text(text: str) -> str:
     redacted = text
     for pattern in SECRET_PATTERNS:
-        redacted = pattern.sub(lambda match: f"{match.group(1)}=<redacted>", redacted)
+        if pattern.pattern.startswith("(?i)(^|"):
+            redacted = pattern.sub(lambda match: f"{match.group(1)}{match.group(2)}=<redacted>", redacted)
+        else:
+            redacted = pattern.sub(lambda match: f"{match.group(1)}=<redacted>", redacted)
     return redacted
 
 

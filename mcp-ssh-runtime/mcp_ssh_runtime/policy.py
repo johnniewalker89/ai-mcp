@@ -69,6 +69,11 @@ AIRFLOW_PROFILES = {
     HostProfile.AIRFLOW_PROD_LIKE,
 }
 
+FLINK_PROFILES = {
+    HostProfile.FLINK_DEV,
+    HostProfile.FLINK_PROD,
+}
+
 LEGACY_AIRFLOW_FS_ONLY_MESSAGE = (
     "Airflow CLI tools are unavailable for profile legacy_airflow_fs_only. "
     "Use legacy Airflow filesystem/log tools for read-only evidence, or configure "
@@ -205,4 +210,11 @@ def ensure_legacy_airflow_host(host: SshHostConfig) -> None:
             "Legacy Airflow filesystem/log tools are only allowed for profile "
             "legacy_airflow_fs_only. Use Airflow 3 typed tools for airflow_dev, "
             "airflow_prod, and airflow_prod_like profiles."
+        )
+
+
+def ensure_flink_host(host: SshHostConfig) -> None:
+    if host.profile not in FLINK_PROFILES:
+        raise RuntimeAccessError(
+            f"Host profile {host.profile.value} is not a Flink profile."
         )

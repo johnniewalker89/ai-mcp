@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from dotenv import load_dotenv
@@ -35,11 +36,17 @@ from mcp_ssh_runtime.mcp_env import (
     get_config,
     get_mcp_config,
 )
+from mcp_ssh_runtime.flink_commands import (
+    build_flink_job_exceptions_command,
+    build_flink_list_jobs_command,
+    build_flink_restart_job_command,
+)
 from mcp_ssh_runtime.policy import (
     ActionClass,
     RuntimeAccessError,
     ensure_action_allowed,
     ensure_airflow_host,
+    ensure_flink_host,
     ensure_legacy_airflow_host,
     validate_identifier,
     validate_task_state,
@@ -278,6 +285,93 @@ def process_list(alias: str, pattern: str | None = None) -> dict[str, object]:
     try:
         command = build_process_list_command(pattern=pattern)
         return run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def flink_list_jobs(alias: str, flink_bin: str = "/opt/flink/bin/flink") -> dict[str, object]:
+    """List Flink jobs on a flink_dev/flink_prod host as gitlab-runner."""
+
+    cfg, host = _host(ActionClass.SSH_READ, alias)
+    try:
+        ensure_flink_host(host)
+        command = build_flink_list_jobs_command(flink_bin=flink_bin)
+        result = run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+        try:
+            payload = json.loads(str(result["stdout"]))
+            result["jobs"] = payload.get("jobs", [])
+            result["flink_stderr"] = payload.get("stderr", "")
+        except json.JSONDecodeError:
+            result["parse_warning"] = "Could not parse flink_list_jobs JSON stdout."
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def flink_job_exceptions(
+    alias: str,
+    job_id: str,
+    max_bytes: int = 4_000,
+) -> dict[str, object]:
+    """Read Flink REST /jobs/<job_id>/exceptions on a flink_dev/flink_prod host."""
+
+    cfg, host = _host(ActionClass.SSH_READ, alias)
+    try:
+        ensure_flink_host(host)
+        command = build_flink_job_exceptions_command(job_id, max_bytes=max_bytes)
+        result = run_remote_command(cfg, host, ActionClass.SSH_READ, command).to_dict()
+        try:
+            result["exceptions"] = json.loads(str(result["stdout"]))
+        except json.JSONDecodeError:
+            result["parse_warning"] = "Could not parse Flink exceptions JSON stdout."
+        return result
+    except RuntimeAccessError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def flink_restart_job(
+    alias: str,
+    job_name: str,
+    reason: str,
+    rollback: str,
+    approved: bool = False,
+    flink_bin: str = "/opt/flink/bin/flink",
+    jar_path: str | None = None,
+    schema_dir: str = "/opt/flink/jobs/",
+    config_path: str = "/opt/flink/jobs/config.properties",
+    savepoint_dir: str | None = None,
+    start_if_missing: bool = False,
+) -> dict[str, object]:
+    """Restart one Flink job by name with a savepoint. Requires approved=true."""
+
+    if not reason.strip() or not rollback.strip():
+        raise ToolError("reason and rollback must be non-empty.")
+    cfg, host = _host(ActionClass.HOST_CHANGE, alias, approved=approved)
+    try:
+        ensure_flink_host(host)
+        command = build_flink_restart_job_command(
+            job_name,
+            flink_bin=flink_bin,
+            jar_path=jar_path,
+            schema_dir=schema_dir,
+            config_path=config_path,
+            savepoint_dir=savepoint_dir,
+            start_if_missing=start_if_missing,
+        )
+        result = run_remote_command(cfg, host, ActionClass.HOST_CHANGE, command).to_dict()
+        try:
+            result["flink_restart"] = json.loads(str(result["stdout"]))
+        except json.JSONDecodeError:
+            result["parse_warning"] = "Could not parse flink_restart_job JSON stdout."
+        result["approval_context"] = {
+            "reason": reason,
+            "target": f"{alias}:{job_name}",
+            "rollback": rollback,
+        }
+        return result
     except RuntimeAccessError as exc:
         raise ToolError(str(exc)) from exc
 

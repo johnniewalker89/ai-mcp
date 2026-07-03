@@ -21,6 +21,9 @@ tool exists only for explicit approval cases.
 - `service_restart`
 - `process_list`
 - `run_approved_command`
+- `flink_list_jobs`
+- `flink_job_exceptions`
+- `flink_restart_job`
 - `legacy_airflow_dag_file`
 - `legacy_airflow_config_list`
 - `legacy_airflow_task_log_list`
@@ -70,6 +73,28 @@ expectation. Raw database client commands through SSH are blocked.
 No host profile exposes database query tools. Database metadata, queries,
 writes, cleanup, and privileged operations must go through the database MCP
 access path, not through SSH.
+
+## Flink Runtime
+
+Flink tools are available only for `flink_dev` and `flink_prod` host profiles.
+They run on the remote host as the Flink working OS user:
+
+```text
+sudo -n -iu gitlab-runner ...
+```
+
+- `flink_list_jobs`: read-only `flink list` evidence with parsed job metadata.
+- `flink_job_exceptions`: read-only Flink REST `/jobs/<job_id>/exceptions`.
+- `flink_restart_job`: approval-gated `host_change`; stops one job by exact
+  `[job_name]` with a savepoint and starts the configured jar with the same
+  savepoint.
+
+Default restart paths follow the repo deployment convention:
+
+- jar: `/opt/flink/jobs/<job_name>.jar`
+- schema dir: `/opt/flink/jobs/`
+- config: `/opt/flink/jobs/config.properties`
+- savepoint dir: `/opt/flink/savepoints/<job_name>`
 
 ## Airflow Runtime
 
@@ -159,6 +184,12 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers.ssh_runtime.tools.process_list]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.flink_list_jobs]
+approval_mode = "approve"
+
+[mcp_servers.ssh_runtime.tools.flink_job_exceptions]
 approval_mode = "approve"
 
 [mcp_servers.ssh_runtime.tools.legacy_airflow_dag_file]
