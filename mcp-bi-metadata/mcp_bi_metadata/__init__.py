@@ -1,1 +1,0 @@
-"""BI metadata MCP server."""
