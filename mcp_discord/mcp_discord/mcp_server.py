@@ -243,6 +243,7 @@ def send_embed(
     url: str = "",
     color: int = 3447003,
     fields_json: str = "[]",
+    content: str = "",
 ) -> dict[str, object]:
     """Send a simple embed announcement to an allowed Discord channel."""
 
@@ -286,13 +287,17 @@ def send_embed(
     if url.strip():
         embed["url"] = url.strip()
 
+    payload: dict[str, Any] = {
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+    }
+    if content.strip():
+        payload["content"] = _clean_text(content, "content", 1900)
+
     row = _discord_request(
         "POST",
         f"/channels/{channel_id}/messages",
-        payload={
-            "embeds": [embed],
-            "allowed_mentions": {"parse": []},
-        },
+        payload=payload,
     )
     return {
         "channel_id": channel_id,
