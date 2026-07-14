@@ -108,10 +108,24 @@ approval_mode = "approve"
 ```
 
 Локальный файл `C:\Users\Admin\.codex\openmetadata-oauth-client-info.json`
-не содержит секретов:
+создается через OAuth client registration на `https://bi-metadata.x340.org/mcp/register`.
+Он содержит локальный OAuth client info и не хранится в git.
 
-```json
-{"client_id":"OpenMetadata"}
+Пример создания без вывода содержимого:
+
+```powershell
+$body = @{
+  client_name = 'Codex'
+  redirect_uris = @('http://localhost:37469/oauth/callback')
+  grant_types = @('authorization_code','refresh_token')
+  response_types = @('code')
+  token_endpoint_auth_method = 'none'
+  scope = 'openid profile email'
+} | ConvertTo-Json -Compress
+$r = Invoke-RestMethod -Uri 'https://bi-metadata.x340.org/mcp/register' -Method Post -ContentType 'application/json' -Body $body
+@{ client_id = $r.client_id; client_secret = $r.client_secret } |
+  ConvertTo-Json -Compress |
+  Set-Content -LiteralPath 'C:\Users\Admin\.codex\openmetadata-oauth-client-info.json' -Encoding UTF8
 ```
 
 При первом запуске `mcp-remote` должен провести OAuth-авторизацию через браузер.
