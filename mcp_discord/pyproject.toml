@@ -1,0 +1,25 @@
+[project]
+name = "mcp-discord"
+version = "0.2.0"
+description = "Safe read/post-only MCP server for Discord community channels."
+requires-python = ">=3.10"
+dependencies = [
+  "fastmcp>=2.0.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+mcp-discord = "mcp_discord.main:main"
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_discord"]
+
+[tool.ruff]
+line-length = 100
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

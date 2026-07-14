@@ -16,6 +16,9 @@
 - `mcp-rabbitmq` — MCP-сервер RabbitMQ Management API: read-only просмотр
   brokers/exchanges/queues/bindings/consumers и approval-gated declare/bind/
   purge/delete операции.
+- `mcp_discord` — MCP-сервер Discord Bot API для безопасной работы с
+  allowlisted community-каналами: read/post tools и approval-gated управление
+  каналами/закрепами.
 
 ## Пример установки
 
@@ -111,3 +114,35 @@ RABBITMQ_MCP_PROD_PASSWORD=<local only>
 RabbitMQ tools. Не auto-approve `declare_exchange`, `declare_queue`,
 `bind_queue`, `purge_queue`, `delete_queue`; сами tools дополнительно требуют
 `approved=true`.
+
+Discord:
+
+```toml
+[mcp_servers.mcp_discord]
+command = "uvx"
+args = [
+  "--refresh",
+  "--from",
+  "git+https://github.com/johnniewalker89/ai-mcp.git#subdirectory=mcp_discord",
+  "mcp-discord"
+]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.mcp_discord.env]
+DISCORD_MCP_ENV_FILE = "C:\\Users\\Admin\\.codex\\discord-mcp.env"
+```
+
+В локальном env-файле:
+
+```dotenv
+DISCORD_MCP_BOT_TOKEN=<local only>
+DISCORD_MCP_ALLOWED_GUILD_IDS=<server id>
+DISCORD_MCP_ALLOWED_CHANNEL_IDS=<channel id>
+DISCORD_MCP_RELEASE_CHANNEL_IDS=<release channel id>
+```
+
+Для Codex можно auto-approve только `list_allowed_scope`, `list_channels` и
+`get_recent_messages` после настройки channel allowlist. `send_message`,
+`send_embed`, `create_text_channel`, `update_channel`, `pin_message`,
+`unpin_message`, `edit_own_message` и `delete_own_message` нужно оставить
+prompt-gated; state-changing tools дополнительно требуют `approved=true`.
