@@ -85,7 +85,7 @@ BI Metadata, preferred remote OAuth setup:
 ```toml
 [mcp_servers.bi_metadata]
 command = "C:\\Program Files\\nodejs\\npx.cmd"
-args = ["-y", "mcp-remote", "https://bi-metadata.x340.org/mcp", "--auth-server-url=https://bi-metadata.x340.org/mcp", "--client-id=OpenMetadata"]
+args = ["-y", "mcp-remote", "https://bi-metadata.x340.org/mcp", "--auth-server-url=https://bi-metadata.x340.org/mcp", "--static-oauth-client-info", "@C:\\Users\\Admin\\.codex\\openmetadata-oauth-client-info.json"]
 default_tools_approval_mode = "prompt"
 
 [mcp_servers.bi_metadata.tools.search_metadata]
@@ -105,6 +105,13 @@ approval_mode = "approve"
 
 [mcp_servers.bi_metadata.tools.get_test_definitions]
 approval_mode = "approve"
+```
+
+Локальный файл `C:\Users\Admin\.codex\openmetadata-oauth-client-info.json`
+не содержит секретов:
+
+```json
+{"client_id":"OpenMetadata"}
 ```
 
 При первом запуске `mcp-remote` должен провести OAuth-авторизацию через браузер.
