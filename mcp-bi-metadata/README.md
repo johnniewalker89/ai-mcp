@@ -1,9 +1,22 @@
 # mcp-bi-metadata
 
-Read-only MCP-сервер для BI OpenMetadata API.
+Read-only fallback MCP-сервер для BI OpenMetadata API.
 
 Сервер не содержит credentials и читает токен только из локального env-файла.
 По умолчанию использует `https://bi-metadata.x340.org/api`.
+
+Основная локальная установка для Codex на Windows использует командный remote
+OpenMetadata MCP через OAuth:
+
+```toml
+[mcp_servers.bi_metadata]
+command = "C:\\Program Files\\nodejs\\npx.cmd"
+args = ["-y", "mcp-remote", "https://bi-metadata.x340.org/mcp", "--auth-server-url=https://bi-metadata.x340.org/mcp", "--client-id=OpenMetadata"]
+default_tools_approval_mode = "prompt"
+```
+
+Этот пакет нужен как переносимый read-only fallback, если remote OAuth MCP
+недоступен или нужен узкий catalog-only контур без write/admin tools.
 
 ## Tools
 
@@ -31,7 +44,7 @@ BI_METADATA_MCP_TOKEN=<local only>
 # BI_METADATA_MCP_AUTH_SCHEME=Bearer
 ```
 
-## Codex install
+## Codex fallback install
 
 ```toml
 [mcp_servers.bi_metadata]

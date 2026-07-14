@@ -83,7 +83,39 @@ reads без отдельного решения.
 Credentials и настройки конкретного хоста должны жить только в локальном
 конфиге MCP-клиента.
 
-BI Metadata:
+BI Metadata, preferred remote OAuth setup:
+
+```toml
+[mcp_servers.bi_metadata]
+command = "C:\\Program Files\\nodejs\\npx.cmd"
+args = ["-y", "mcp-remote", "https://bi-metadata.x340.org/mcp", "--auth-server-url=https://bi-metadata.x340.org/mcp", "--client-id=OpenMetadata"]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.bi_metadata.tools.search_metadata]
+approval_mode = "approve"
+
+[mcp_servers.bi_metadata.tools.semantic_search]
+approval_mode = "approve"
+
+[mcp_servers.bi_metadata.tools.get_entity_details]
+approval_mode = "approve"
+
+[mcp_servers.bi_metadata.tools.get_entity_lineage]
+approval_mode = "approve"
+
+[mcp_servers.bi_metadata.tools.root_cause_analysis]
+approval_mode = "approve"
+
+[mcp_servers.bi_metadata.tools.get_test_definitions]
+approval_mode = "approve"
+```
+
+При первом запуске `mcp-remote` должен провести OAuth-авторизацию через браузер.
+Read-only tools можно auto-approve. OpenMetadata write/admin tools вроде
+`create_lineage`, `create_test_case`, `create_glossary`,
+`create_glossary_term` и `patch_entity` нужно оставить prompt-gated.
+
+Fallback read-only package from this repo:
 
 ```toml
 [mcp_servers.bi_metadata]
@@ -100,7 +132,7 @@ default_tools_approval_mode = "prompt"
 BI_METADATA_MCP_ENV_FILE = "C:\\Users\\Admin\\.codex\\bi-metadata-mcp.env"
 ```
 
-В локальном env-файле:
+Fallback env file:
 
 ```dotenv
 BI_METADATA_MCP_BASE_URL=https://bi-metadata.x340.org
@@ -112,7 +144,7 @@ BI_METADATA_MCP_TOKEN=<local only>
 `bi_metadata_get_table_by_fqn`, `bi_metadata_get_table_by_id`,
 `bi_metadata_table_lineage_by_fqn`, `bi_metadata_list_database_services`,
 `bi_metadata_list_databases` и `bi_metadata_list_database_schemas`.
-Sample-data и write/update tools в этом MCP не реализованы.
+Sample-data и write/update tools в fallback MCP не реализованы.
 
 RabbitMQ:
 
