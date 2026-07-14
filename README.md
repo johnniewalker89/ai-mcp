@@ -16,6 +16,9 @@
 - `mcp-rabbitmq` — MCP-сервер RabbitMQ Management API: read-only просмотр
   brokers/exchanges/queues/bindings/consumers и approval-gated declare/bind/
   purge/delete операции.
+- `mcp-bi-metadata` — read-only MCP-сервер для BI OpenMetadata API:
+  поиск таблиц, чтение FQN/колонок/owners/tags/domains, lineage и database
+  service/schema metadata без sample-data и write endpoints.
 - `mcp_discord` — MCP-сервер Discord Bot API для безопасной работы с
   allowlisted community-каналами: read/post tools и approval-gated управление
   каналами/закрепами.
@@ -79,6 +82,37 @@ reads без отдельного решения.
 
 Credentials и настройки конкретного хоста должны жить только в локальном
 конфиге MCP-клиента.
+
+BI Metadata:
+
+```toml
+[mcp_servers.bi_metadata]
+command = "uvx"
+args = [
+  "--refresh",
+  "--from",
+  "git+https://github.com/johnniewalker89/ai-mcp.git#subdirectory=mcp-bi-metadata",
+  "mcp-bi-metadata"
+]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.bi_metadata.env]
+BI_METADATA_MCP_ENV_FILE = "C:\\Users\\Admin\\.codex\\bi-metadata-mcp.env"
+```
+
+В локальном env-файле:
+
+```dotenv
+BI_METADATA_MCP_BASE_URL=https://bi-metadata.x340.org
+BI_METADATA_MCP_TOKEN=<local only>
+```
+
+Для Codex можно auto-approve read-only tools `bi_metadata_config`,
+`bi_metadata_version`, `bi_metadata_search`, `bi_metadata_list_tables`,
+`bi_metadata_get_table_by_fqn`, `bi_metadata_get_table_by_id`,
+`bi_metadata_table_lineage_by_fqn`, `bi_metadata_list_database_services`,
+`bi_metadata_list_databases` и `bi_metadata_list_database_schemas`.
+Sample-data и write/update tools в этом MCP не реализованы.
 
 RabbitMQ:
 
