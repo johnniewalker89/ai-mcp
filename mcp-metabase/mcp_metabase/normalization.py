@@ -659,27 +659,138 @@ def _template_tags_by_name(raw_tags: Any) -> dict[str, dict[str, Any]]:
     return {}
 
 
-def _card_native_template_tags(card: Any) -> dict[str, dict[str, Any]]:
+def _card_native_template_tags(card: Any) -> dict[str, tuple[dict[str, Any], int | None]]:
     if not isinstance(card, dict):
         return {}
     dataset_query = card.get("dataset_query")
     if not isinstance(dataset_query, dict):
         return {}
 
-    tags: dict[str, dict[str, Any]] = {}
+    tags: dict[str, tuple[dict[str, Any], int | None]] = {}
     native = dataset_query.get("native")
     if isinstance(native, dict):
-        tags.update(_template_tags_by_name(native.get("template-tags")))
+        tags.update(
+            (name, (tag, None))
+            for name, tag in _template_tags_by_name(native.get("template-tags")).items()
+        )
 
     stages = dataset_query.get("stages")
     if isinstance(stages, list):
-        for stage in stages:
+        for stage_number, stage in enumerate(stages):
             if isinstance(stage, dict) and stage.get("lib/type") == "mbql.stage/native":
-                tags.update(_template_tags_by_name(stage.get("template-tags")))
+                for name, tag in _template_tags_by_name(stage.get("template-tags")).items():
+                    if name in tags:
+                        raise MutationValidationError(
+                            "Native template-tag names must be unique across query stages."
+                        )
+                    tags[name] = (tag, stage_number)
     return tags
 
 
-def _validate_dashboard_parameter_compatibility(state: dict[str, Any]) -> None:
+def _target_stage_numbers(target: Any) -> list[Any]:
+    if isinstance(target, dict):
+        values = [target.get("stage-number")] if "stage-number" in target else []
+        for value in target.values():
+            values.extend(_target_stage_numbers(value))
+        return values
+    if isinstance(target, list):
+        values: list[Any] = []
+        for value in target:
+            values.extend(_target_stage_numbers(value))
+        return values
+    return []
+
+
+def _template_tag_target_kind(target: Any) -> str | None:
+    if isinstance(target, list) and target and target[0] in {"dimension", "variable"}:
+        return target[0]
+    return None
+
+
+def _dashboard_validation_state(
+    state: dict[str, Any],
+    cards: dict[int, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    candidate = copy.deepcopy(state)
+    if not cards:
+        return candidate
+    for dashcard in candidate.get("dashcards", []) or []:
+        if not isinstance(dashcard, dict):
+            continue
+        card_id = dashcard.get("card_id")
+        if type(card_id) is int and card_id in cards:
+            dashcard["card"] = copy.deepcopy(cards[card_id])
+    return candidate
+
+
+def canonicalize_dashboard_parameter_mappings(
+    state: dict[str, Any],
+    *,
+    cards: dict[int, dict[str, Any]] | None = None,
+) -> None:
+    """Fill the executable native-mapping fields Metabase otherwise accepts silently."""
+
+    candidate = _dashboard_validation_state(state, cards)
+    source_dashcards = state.get("dashcards", []) or []
+    candidate_dashcards = candidate.get("dashcards", []) or []
+    for dashcard, hydrated in zip(source_dashcards, candidate_dashcards, strict=True):
+        if not isinstance(dashcard, dict) or not isinstance(hydrated, dict):
+            continue
+        card_id = dashcard.get("card_id")
+        tags = _card_native_template_tags(hydrated.get("card"))
+        for mapping in dashcard.get("parameter_mappings", []) or []:
+            if not isinstance(mapping, dict):
+                continue
+            target = mapping.get("target")
+            tag_name = _template_tag_name(target)
+            if not tag_name:
+                continue
+            if type(card_id) is not int or card_id <= 0:
+                raise MutationValidationError(
+                    "Native dashboard mappings require a positive dashcard card_id."
+                )
+            mapped_card_id = mapping.get("card_id")
+            if mapped_card_id is None:
+                mapping["card_id"] = card_id
+            elif mapped_card_id != card_id:
+                raise MutationValidationError(
+                    "Dashboard mapping card_id must match its owning dashcard."
+                )
+            tag = tags.get(tag_name)
+            if tag is None:
+                raise MutationValidationError(
+                    "Dashboard mapping references a missing native template tag."
+                )
+            _, stage_number = tag
+            if stage_number is None:
+                continue
+            target_kind = _template_tag_target_kind(target)
+            stage_numbers = _target_stage_numbers(target)
+            if target_kind == "variable":
+                if stage_numbers:
+                    raise MutationValidationError(
+                        "Native variable dashboard mappings must not include stage-number."
+                    )
+                continue
+            if target_kind != "dimension":
+                raise MutationValidationError(
+                    "Native dashboard template-tag targets must use variable or dimension."
+                )
+            if not stage_numbers:
+                if not isinstance(target, list):
+                    raise MutationValidationError("Dashboard mapping target must be an array.")
+                target.append({"stage-number": stage_number})
+            elif len(stage_numbers) != 1 or stage_numbers[0] != stage_number:
+                raise MutationValidationError(
+                    "Dashboard mapping stage-number must match its native query stage."
+                )
+
+
+def _validate_dashboard_parameter_compatibility(
+    state: dict[str, Any],
+    *,
+    require_executable_mappings: bool,
+) -> None:
     parameters = state.get("parameters", [])
     dashcards = state.get("dashcards", [])
     ids: set[str] = set()
@@ -710,11 +821,12 @@ def _validate_dashboard_parameter_compatibility(state: dict[str, Any]) -> None:
             tag_name = _template_tag_name(mapping.get("target"))
             if not tag_name:
                 continue
-            tag = tags.get(tag_name)
-            if not isinstance(tag, dict):
+            tag_definition = tags.get(tag_name)
+            if tag_definition is None:
                 raise MutationValidationError(
                     "Dashboard mapping references a missing native template tag."
                 )
+            tag, stage_number = tag_definition
             tag_family = _parameter_family(tag.get("widget-type")) or _parameter_family(
                 tag.get("type")
             )
@@ -723,9 +835,40 @@ def _validate_dashboard_parameter_compatibility(state: dict[str, Any]) -> None:
                 raise MutationValidationError(
                     "Dashboard parameter type is incompatible with the mapped native template tag."
                 )
+            if not require_executable_mappings:
+                continue
+            card_id = dashcard.get("card_id")
+            if type(card_id) is not int or card_id <= 0 or mapping.get("card_id") != card_id:
+                raise MutationValidationError(
+                    "Native dashboard mappings require the owning positive card_id."
+                )
+            if stage_number is not None:
+                target = mapping.get("target")
+                target_kind = _template_tag_target_kind(target)
+                stage_numbers = _target_stage_numbers(target)
+                if target_kind == "variable":
+                    if stage_numbers:
+                        raise MutationValidationError(
+                            "Native variable dashboard mappings must not include stage-number."
+                        )
+                elif target_kind == "dimension":
+                    if stage_numbers != [stage_number]:
+                        raise MutationValidationError(
+                            "Native dimension dashboard mappings require the exact "
+                            "query stage-number."
+                        )
+                else:
+                    raise MutationValidationError(
+                        "Native dashboard template-tag targets must use variable or dimension."
+                    )
 
 
-def validate_state(state: dict[str, Any], object_type: ObjectType) -> None:
+def validate_state(
+    state: dict[str, Any],
+    object_type: ObjectType,
+    *,
+    require_executable_mappings: bool = False,
+) -> None:
     if object_type is ObjectType.QUESTION:
         if not isinstance(state.get("name"), str) or not state["name"].strip():
             raise MutationValidationError("Question name must be non-empty.")
@@ -750,7 +893,10 @@ def validate_state(state: dict[str, Any], object_type: ObjectType) -> None:
         _positive_or_none(state.get("collection_id"), "Dashboard collection_id")
         if "archived" in state and type(state["archived"]) is not bool:
             raise MutationValidationError("Dashboard archived must be boolean.")
-        _validate_dashboard_parameter_compatibility(state)
+        _validate_dashboard_parameter_compatibility(
+            state,
+            require_executable_mappings=require_executable_mappings,
+        )
     elif object_type is ObjectType.COLLECTION:
         if not isinstance(state.get("name"), str) or not state["name"].strip():
             raise MutationValidationError("Collection name must be non-empty.")
@@ -785,6 +931,11 @@ def _build_write_payload(
                     "Dashboard writes require complete tabs and dashcards snapshots."
                 )
             payload[root] = copy.deepcopy(state[root])
+        for dashcard in payload["dashcards"]:
+            if isinstance(dashcard, dict):
+                # GET embeds a server-owned card snapshot. Dashboard writes own
+                # only the placement, mappings, and visualization overrides.
+                dashcard.pop("card", None)
     return payload
 
 
@@ -793,18 +944,43 @@ def build_mutation(
     object_type: ObjectType,
     raw_before: dict[str, Any],
     operations: list[PatchOperation],
+    dashboard_cards: dict[int, dict[str, Any]] | None = None,
 ) -> PlannedMutation:
     if object_type not in MUTABLE_ROOTS:
         raise MutationValidationError("Object type has no update contract.")
     if not 1 <= len(operations) <= 100:
         raise MutationValidationError("Patch must contain between 1 and 100 operations.")
     before = project_state(raw_before, object_type)
-    validate_state(before, object_type)
+    validate_state(_dashboard_validation_state(before, dashboard_cards), object_type)
     after = copy.deepcopy(before)
     changed_roots = tuple(
         dict.fromkeys(_apply_operation(after, object_type, op) for op in operations)
     )
-    validate_state(after, object_type)
+    require_executable_mappings = bool(
+        object_type is ObjectType.DASHBOARD
+        and set(changed_roots).intersection({"parameters", "dashcards"})
+    )
+    mapping_change_requested = bool(
+        object_type is ObjectType.DASHBOARD
+        and (
+            "parameters" in changed_roots
+            or any(
+                operation.path == "/dashcards"
+                and (
+                    operation.op == "replace_array"
+                    or str(operation.item_path).startswith(("/card_id", "/parameter_mappings"))
+                )
+                for operation in operations
+            )
+        )
+    )
+    if mapping_change_requested:
+        canonicalize_dashboard_parameter_mappings(after, cards=dashboard_cards)
+    validate_state(
+        _dashboard_validation_state(after, dashboard_cards),
+        object_type,
+        require_executable_mappings=require_executable_mappings,
+    )
     if canonical_sha256(before) == canonical_sha256(after):
         raise MutationValidationError("Patch produces no state change.")
     payload = _build_write_payload(object_type, after, changed_roots)
@@ -897,6 +1073,94 @@ def _verification_root_values(
     return without_unchanged_timestamps(observed), without_unchanged_timestamps(expected)
 
 
+_DASHBOARD_SERVER_MANAGED_ITEM_KEYS = frozenset({"card", "created_at", "dashboard_id", "entity_id"})
+
+
+def _dashboard_semantic_item(
+    value: Any,
+    *,
+    tab_ids: dict[int, int] | None = None,
+    strip_server_fields: bool = False,
+) -> Any:
+    if isinstance(value, dict):
+        projected: dict[str, Any] = {}
+        for key, item in value.items():
+            if strip_server_fields and key in _DASHBOARD_SERVER_MANAGED_ITEM_KEYS:
+                continue
+            if strip_server_fields and key == "id" and type(item) is int and item <= 0:
+                continue
+            if (
+                strip_server_fields
+                and key == "dashboard_tab_id"
+                and type(item) is int
+                and item <= 0
+            ):
+                if tab_ids and item in tab_ids:
+                    projected[key] = tab_ids[item]
+                continue
+            projected[key] = _dashboard_semantic_item(item, tab_ids=tab_ids)
+        return projected
+    if isinstance(value, list):
+        return [
+            _dashboard_semantic_item(
+                item,
+                tab_ids=tab_ids,
+                strip_server_fields=strip_server_fields,
+            )
+            for item in value
+        ]
+    return value
+
+
+def _dashboard_semantic_root(value: Any, *, tab_ids: dict[int, int] | None) -> Any:
+    if not isinstance(value, list):
+        return _dashboard_semantic_item(value, tab_ids=tab_ids)
+    return [
+        _dashboard_semantic_item(item, tab_ids=tab_ids, strip_server_fields=True) for item in value
+    ]
+
+
+def _dashboard_tab_id_map(expected: Any, observed: Any) -> dict[int, int] | None:
+    if (
+        not isinstance(expected, list)
+        or not isinstance(observed, list)
+        or len(expected) != len(observed)
+    ):
+        return None
+    mapping: dict[int, int] = {}
+    for left, right in zip(expected, observed, strict=True):
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return None
+        left_id = left.get("id")
+        right_id = right.get("id")
+        if type(left_id) is int and left_id <= 0:
+            if type(right_id) is not int or right_id <= 0:
+                return None
+            mapping[left_id] = right_id
+    return mapping
+
+
+def _protected_root_semantically_matches(
+    mutation: PlannedMutation,
+    readback_state: dict[str, Any],
+    root: str,
+) -> bool:
+    observed, expected = _verification_root_values(mutation, readback_state, root)
+    if root == "dataset_query":
+        return dataset_query_semantically_matches(expected, observed)
+    if mutation.object_type is not ObjectType.DASHBOARD:
+        return _semantic_subset_matches(expected, observed)
+
+    tabs_expected = mutation.after_state.get("tabs") if mutation.after_state else None
+    tabs_observed = readback_state.get("tabs")
+    tab_ids = _dashboard_tab_id_map(tabs_expected, tabs_observed)
+    if root == "tabs" and tab_ids is None:
+        return False
+    projected_expected = _dashboard_semantic_root(expected, tab_ids=tab_ids)
+    projected_observed = _dashboard_semantic_root(observed, tab_ids=None)
+    return _semantic_subset_matches(projected_expected, projected_observed)
+
+
 def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> bool:
     if mutation.after_state is None or mutation.object_id is None:
         return False
@@ -906,13 +1170,7 @@ def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> 
     roots = set(mutation.changed_roots) | (
         set(PROTECTED_ROOTS.get(mutation.object_type, frozenset())) - set(mutation.changed_roots)
     )
-    for root in roots:
-        observed, expected = _verification_root_values(mutation, readback, root)
-        if root == "dataset_query" and dataset_query_semantically_matches(expected, observed):
-            continue
-        if canonical_sha256(observed) != canonical_sha256(expected):
-            return False
-    return True
+    return all(_protected_root_semantically_matches(mutation, readback, root) for root in roots)
 
 
 def mutation_summary(mutation: PlannedMutation) -> dict[str, Any]:

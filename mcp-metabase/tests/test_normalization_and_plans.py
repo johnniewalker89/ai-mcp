@@ -54,11 +54,13 @@ def _dashboard() -> dict:
         "dashcards": [
             {
                 "id": 110,
+                "card_id": 1,
                 "dashboard_tab_id": 101,
                 "visualization_settings": {"card.title": "Old", "card.hide_empty": False},
                 "parameter_mappings": [
                     {
                         "parameter_id": "city-param",
+                        "card_id": 1,
                         "target": ["variable", ["template-tag", "city"]],
                     }
                 ],
@@ -100,6 +102,24 @@ def _dashboard_v063() -> dict:
             }
         ],
     }
+    dashboard["dashcards"][0]["parameter_mappings"][0]["target"] = [
+        "dimension",
+        ["template-tag", "city"],
+    ]
+    return dashboard
+
+
+def _dashboard_v063_raw_value() -> dict:
+    dashboard = _dashboard_v063()
+    dashboard["parameters"][0]["type"] = "string/="
+    dashboard["dashcards"][0]["card"]["dataset_query"]["stages"][0]["template-tags"][0].update(
+        {"type": "text", "widget-type": "string/="}
+    )
+    dashboard["dashcards"][0]["parameter_mappings"][0]["target"] = [
+        "variable",
+        ["template-tag", "city"],
+    ]
+    dashboard["dashcards"][0]["parameter_mappings"][0].pop("card_id")
     return dashboard
 
 
@@ -161,6 +181,27 @@ def test_question_verification_accepts_legacy_native_canonicalized_to_mbql_v2() 
     readback["dataset_query"]["stages"][0]["template-tags"].append(
         {"name": "unexpected", "type": "text"}
     )
+    assert verify_mutation(mutation, readback) is False
+
+
+def test_question_verification_accepts_server_added_visual_defaults() -> None:
+    mutation = build_mutation(
+        object_type=ObjectType.QUESTION,
+        raw_before=_question(),
+        operations=[
+            PatchOperation(
+                op="set",
+                path="/visualization_settings/graph/metrics",
+                value="sum",
+            )
+        ],
+    )
+    readback = copy.deepcopy(mutation.after_state)
+    readback["visualization_settings"]["server.default"] = True
+
+    assert verify_mutation(mutation, readback) is True
+
+    readback["visualization_settings"]["graph"].pop("legacy")
     assert verify_mutation(mutation, readback) is False
 
 
@@ -254,6 +295,116 @@ def test_dashboard_v063_template_tag_list_is_accepted() -> None:
     )
 
     assert mutation.after_state["dashcards"] == before["dashcards"]
+
+
+def test_dashboard_v063_mapping_is_canonicalized_for_an_executable_write() -> None:
+    before = _dashboard_v063()
+    replacement = copy.deepcopy(before["dashcards"])
+
+    mutation = build_mutation(
+        object_type=ObjectType.DASHBOARD,
+        raw_before=before,
+        operations=[PatchOperation(op="replace_array", path="/dashcards", value=replacement)],
+    )
+
+    mapping = mutation.write_payload["dashcards"][0]["parameter_mappings"][0]
+    assert mapping["card_id"] == 1
+    assert mapping["target"][-1] == {"stage-number": 0}
+    assert "card" not in mutation.write_payload["dashcards"][0]
+
+
+def test_dashboard_v063_raw_value_mapping_keeps_schema_valid_variable_target() -> None:
+    before = _dashboard_v063_raw_value()
+
+    mutation = build_mutation(
+        object_type=ObjectType.DASHBOARD,
+        raw_before=before,
+        operations=[
+            PatchOperation(
+                op="replace_array",
+                path="/dashcards",
+                value=copy.deepcopy(before["dashcards"]),
+            )
+        ],
+    )
+
+    mapping = mutation.write_payload["dashcards"][0]["parameter_mappings"][0]
+    assert mapping["card_id"] == 1
+    assert mapping["target"] == ["variable", ["template-tag", "city"]]
+
+
+def test_dashboard_v063_raw_value_mapping_rejects_stage_number() -> None:
+    before = _dashboard_v063_raw_value()
+    replacement = copy.deepcopy(before["dashcards"])
+    replacement[0]["parameter_mappings"][0]["target"].append({"stage-number": 0})
+
+    with pytest.raises(MutationValidationError, match="must not include stage-number"):
+        build_mutation(
+            object_type=ObjectType.DASHBOARD,
+            raw_before=before,
+            operations=[PatchOperation(op="replace_array", path="/dashcards", value=replacement)],
+        )
+
+
+def test_dashboard_v063_visual_write_rejects_an_unapproved_mapping_repair() -> None:
+    before = _dashboard_v063()
+
+    with pytest.raises(MutationValidationError, match="stage-number"):
+        build_mutation(
+            object_type=ObjectType.DASHBOARD,
+            raw_before=before,
+            operations=[
+                PatchOperation(
+                    op="dashboard_item_set",
+                    path="/dashcards",
+                    item_id=110,
+                    item_path="/visualization_settings/card.title",
+                    value="Updated",
+                )
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "mapping_change",
+    [
+        {"card_id": 2},
+        {"target": ["variable", ["template-tag", "city"], {"stage-number": 1}]},
+    ],
+    ids=["foreign-card", "foreign-stage"],
+)
+def test_dashboard_v063_mapping_rejects_conflicting_execution_binding(
+    mapping_change: dict,
+) -> None:
+    before = _dashboard_v063()
+    replacement = copy.deepcopy(before["dashcards"])
+    replacement[0]["parameter_mappings"][0].update(mapping_change)
+
+    with pytest.raises(MutationValidationError, match="card_id|stage-number"):
+        build_mutation(
+            object_type=ObjectType.DASHBOARD,
+            raw_before=before,
+            operations=[PatchOperation(op="replace_array", path="/dashcards", value=replacement)],
+        )
+
+
+def test_dashboard_verification_rejects_saved_but_non_executable_native_mapping() -> None:
+    before = _dashboard_v063()
+    mutation = build_mutation(
+        object_type=ObjectType.DASHBOARD,
+        raw_before=before,
+        operations=[
+            PatchOperation(
+                op="replace_array",
+                path="/dashcards",
+                value=copy.deepcopy(before["dashcards"]),
+            )
+        ],
+    )
+    readback = copy.deepcopy(mutation.after_state)
+    readback["dashcards"][0]["parameter_mappings"][0]["target"].pop()
+
+    assert verify_mutation(mutation, readback) is False
 
 
 def test_dashboard_v063_missing_template_tag_is_rejected() -> None:

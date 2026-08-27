@@ -33,6 +33,7 @@ from mcp_metabase.normalization import (
     MutationValidationError,
     build_mutation,
     canonical_sha256,
+    canonicalize_dashboard_parameter_mappings,
     dataset_query_semantically_matches,
     mutation_summary,
     project_state,
@@ -46,6 +47,8 @@ from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
 from mcp_metabase.query_policy import validate_native_preview_sql
 
 COLLECTION_REF_RE = re.compile(r"^(?:root|trash|[1-9][0-9]*|[A-Za-z0-9_-]{21})$")
+MUTATION_RECONCILIATION_ATTEMPTS = 3
+MUTATION_RECONCILIATION_DELAY_SECONDS = 0.2
 SEARCH_MODELS = frozenset(
     {
         "card",
@@ -126,6 +129,55 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.FIELD_VALUES_RESCAN: (frozenset({"database_id"}), frozenset()),
     Action.BATCH: (frozenset({"items"}), frozenset()),
 }
+
+
+def _assign_dashboard_create_element_ids(payload: dict[str, Any]) -> None:
+    """Bind new tabs and dashcards to deterministic temporary Metabase ids."""
+
+    elements: list[tuple[str, dict[str, Any]]] = []
+    used_ids: set[int] = set()
+    for root in ("tabs", "dashcards"):
+        for item in payload.get(root, []):
+            if not isinstance(item, dict):
+                raise MutationValidationError(f"Dashboard {root} must contain objects.")
+            elements.append((root, item))
+            item_id = item.get("id")
+            if item_id is None:
+                continue
+            if type(item_id) is not int or item_id >= 0:
+                raise MutationValidationError(
+                    f"Dashboard create {root} ids must be temporary negative integers."
+                )
+            if item_id in used_ids:
+                raise MutationValidationError(
+                    "Dashboard create element ids must be unique across tabs and dashcards."
+                )
+            used_ids.add(item_id)
+
+    next_id = -1
+    for _, item in elements:
+        if item.get("id") is not None:
+            continue
+        while next_id in used_ids:
+            next_id -= 1
+        item["id"] = next_id
+        used_ids.add(next_id)
+        next_id -= 1
+
+    tab_ids = {item["id"] for root, item in elements if root == "tabs"}
+    for root, item in elements:
+        if root != "dashcards":
+            continue
+        tab_id = item.get("dashboard_tab_id")
+        if tab_id is None and len(tab_ids) == 1:
+            item["dashboard_tab_id"] = next(iter(tab_ids))
+            continue
+        if tab_id is None:
+            continue
+        if type(tab_id) is not int or tab_id >= 0 or tab_id not in tab_ids:
+            raise MutationValidationError(
+                "Dashboard create dashcard dashboard_tab_id must reference a new tab id."
+            )
 
 
 class MetabaseRuntime:
@@ -667,7 +719,7 @@ class MetabaseRuntime:
                 operations,
                 current_state,
             )
-            mutation = build_mutation(
+            mutation = self._build_runtime_mutation(
                 object_type=session.object_type,
                 raw_before=raw,
                 operations=operations,
@@ -848,6 +900,70 @@ class MetabaseRuntime:
                 and type(item.get("card_id")) is int
                 and item["card_id"] > 0
             }
+        )
+
+    def _dashboard_cards_for_mutation(
+        self,
+        raw_before: dict[str, Any],
+        operations: list[PatchOperation],
+    ) -> dict[int, dict[str, Any]]:
+        card_ids: set[int] = set()
+        has_mappings = False
+
+        def collect_dashcards(value: Any) -> None:
+            nonlocal has_mappings
+            if not isinstance(value, list):
+                return
+            for dashcard in value:
+                if not isinstance(dashcard, dict):
+                    continue
+                card_id = dashcard.get("card_id")
+                if type(card_id) is not int or card_id <= 0:
+                    continue
+                card_ids.add(card_id)
+                if dashcard.get("parameter_mappings"):
+                    has_mappings = True
+
+        collect_dashcards(raw_before.get("dashcards"))
+        for operation in operations:
+            if operation.path == "/dashcards":
+                collect_dashcards(operation.value)
+                if operation.item_path == "/parameter_mappings" and operation.value:
+                    has_mappings = True
+            if (
+                operation.path == "/dashcards"
+                and operation.item_path == "/card_id"
+                and type(operation.value) is int
+                and operation.value > 0
+            ):
+                card_ids.add(operation.value)
+        if not has_mappings:
+            return {}
+        if len(card_ids) > self.config.max_list_items:
+            raise MetabasePolicyError(
+                "Dashboard mutation exceeds the configured linked-question bound."
+            )
+        return {
+            card_id: self._object_raw(ObjectType.QUESTION, card_id) for card_id in sorted(card_ids)
+        }
+
+    def _build_runtime_mutation(
+        self,
+        *,
+        object_type: ObjectType,
+        raw_before: dict[str, Any],
+        operations: list[PatchOperation],
+    ) -> PlannedMutation:
+        dashboard_cards = (
+            self._dashboard_cards_for_mutation(raw_before, operations)
+            if object_type is ObjectType.DASHBOARD
+            else None
+        )
+        return build_mutation(
+            object_type=object_type,
+            raw_before=raw_before,
+            operations=operations,
+            dashboard_cards=dashboard_cards,
         )
 
     @staticmethod
@@ -1164,7 +1280,7 @@ class MetabaseRuntime:
             for item in updates:
                 object_type = ObjectType(item.object_type)
                 key = self.edit_sessions.binding_key(object_type, item.object_id)
-                mutation = build_mutation(
+                mutation = self._build_runtime_mutation(
                     object_type=object_type,
                     raw_before=raw_by_key[key],
                     operations=item.operations,
@@ -1881,6 +1997,7 @@ class MetabaseRuntime:
         except ValidationError as exc:
             raise self._validation_error(exc) from None
         payload = request.model_dump(mode="json")
+        _assign_dashboard_create_element_ids(payload)
         for dashcard in payload.get("dashcards", []):
             if isinstance(dashcard, dict):
                 dashcard.pop("card", None)
@@ -1906,7 +2023,16 @@ class MetabaseRuntime:
                     }
                 )
             dashcard["card"] = copy.deepcopy(questions[card_id])
-        validate_state(candidate, ObjectType.DASHBOARD)
+        canonicalize_dashboard_parameter_mappings(candidate, cards=questions)
+        validate_state(
+            candidate,
+            ObjectType.DASHBOARD,
+            require_executable_mappings=True,
+        )
+        payload["dashcards"] = copy.deepcopy(candidate.get("dashcards", []))
+        for dashcard in payload["dashcards"]:
+            if isinstance(dashcard, dict):
+                dashcard.pop("card", None)
         target = self._collection_baseline(request.collection_id)
         target.update(
             {
@@ -2157,7 +2283,7 @@ class MetabaseRuntime:
         context = self._write_context()
         operations = self._parse_operations(raw_operations)
         raw = self._object_raw(object_type, object_id)
-        mutation = build_mutation(
+        mutation = self._build_runtime_mutation(
             object_type=object_type,
             raw_before=raw,
             operations=operations,
@@ -2420,7 +2546,7 @@ class MetabaseRuntime:
         for item in items:
             object_type = ObjectType(item.object_type)
             raw = self._object_raw(object_type, item.object_id)
-            mutation = build_mutation(
+            mutation = self._build_runtime_mutation(
                 object_type=object_type,
                 raw_before=raw,
                 operations=item.operations,
@@ -2789,46 +2915,55 @@ class MetabaseRuntime:
                 "outcome": Outcome.REJECTED_VALIDATION.value,
                 "http_status": request_error.status_code,
                 "verified_after_sha256": None,
+                "reconciliation_attempts": 0,
             }
-        try:
-            if mutation.object_id is None:
-                raise MutationValidationError("Metabase update mutation has no object id.")
-            readback = self._object_raw(mutation.object_type, mutation.object_id)
-            readback_state = project_state(readback, mutation.object_type)
-        except (MetabaseApiError, MutationValidationError):
-            return {
-                "object_type": mutation.object_type.value,
-                "object_id": mutation.object_id,
-                "outcome": Outcome.OUTCOME_UNKNOWN.value,
-                "http_status": request_error.status_code if request_error else None,
-                "verified_after_sha256": None,
-            }
-        readback_sha256 = canonical_sha256(readback_state)
-        if verify_mutation(mutation, readback):
-            mutation.verified_after_state = readback_state
-            mutation.verified_after_sha256 = readback_sha256
-            return {
-                "object_type": mutation.object_type.value,
-                "object_id": mutation.object_id,
-                "outcome": Outcome.APPLIED_VERIFIED.value,
-                "http_status": request_error.status_code if request_error else None,
-                "verified_after_sha256": readback_sha256,
-            }
-        if readback_sha256 == mutation.before_sha256:
-            return {
-                "object_type": mutation.object_type.value,
-                "object_id": mutation.object_id,
-                "outcome": Outcome.NOT_APPLIED_VERIFIED.value,
-                "http_status": request_error.status_code if request_error else None,
-                "verified_after_sha256": readback_sha256,
-            }
-        return {
-            "object_type": mutation.object_type.value,
-            "object_id": mutation.object_id,
-            "outcome": Outcome.OUTCOME_UNKNOWN.value,
-            "http_status": request_error.status_code if request_error else None,
-            "verified_after_sha256": readback_sha256,
-        }
+        last_result: dict[str, Any] | None = None
+        for attempt in range(1, MUTATION_RECONCILIATION_ATTEMPTS + 1):
+            try:
+                if mutation.object_id is None:
+                    raise MutationValidationError("Metabase update mutation has no object id.")
+                readback = self._object_raw(mutation.object_type, mutation.object_id)
+                readback_state = project_state(readback, mutation.object_type)
+            except (MetabaseApiError, MutationValidationError):
+                last_result = {
+                    "object_type": mutation.object_type.value,
+                    "object_id": mutation.object_id,
+                    "outcome": Outcome.OUTCOME_UNKNOWN.value,
+                    "http_status": request_error.status_code if request_error else None,
+                    "verified_after_sha256": None,
+                    "reconciliation_attempts": attempt,
+                }
+            else:
+                readback_sha256 = canonical_sha256(readback_state)
+                if verify_mutation(mutation, readback):
+                    mutation.verified_after_state = readback_state
+                    mutation.verified_after_sha256 = readback_sha256
+                    return {
+                        "object_type": mutation.object_type.value,
+                        "object_id": mutation.object_id,
+                        "outcome": Outcome.APPLIED_VERIFIED.value,
+                        "http_status": request_error.status_code if request_error else None,
+                        "verified_after_sha256": readback_sha256,
+                        "reconciliation_attempts": attempt,
+                    }
+                outcome = (
+                    Outcome.NOT_APPLIED_VERIFIED
+                    if readback_sha256 == mutation.before_sha256
+                    else Outcome.OUTCOME_UNKNOWN
+                )
+                last_result = {
+                    "object_type": mutation.object_type.value,
+                    "object_id": mutation.object_id,
+                    "outcome": outcome.value,
+                    "http_status": request_error.status_code if request_error else None,
+                    "verified_after_sha256": readback_sha256,
+                    "reconciliation_attempts": attempt,
+                }
+            if attempt < MUTATION_RECONCILIATION_ATTEMPTS:
+                time.sleep(MUTATION_RECONCILIATION_DELAY_SECONDS)
+        if last_result is None:  # pragma: no cover - fixed positive attempt bound.
+            raise MetabasePolicyError("Metabase mutation reconciliation did not run.")
+        return last_result
 
     def _apply_update(self, mutation: PlannedMutation) -> dict[str, Any]:
         try:
@@ -2968,6 +3103,12 @@ class MetabaseRuntime:
                 return False
             for key, value in expected.items():
                 if (
+                    key not in actual
+                    and key in {"parameters", "parameter_mappings"}
+                    and value == []
+                ):
+                    continue
+                if (
                     key == "dataset_query"
                     and key in actual
                     and dataset_query_semantically_matches(value, actual[key])
@@ -3010,6 +3151,27 @@ class MetabaseRuntime:
         except (MetabaseApiError, MutationValidationError):
             return None, None
 
+    @classmethod
+    def _question_create_repair_payload(
+        cls,
+        mutation: PlannedMutation,
+        readback: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        expected = copy.deepcopy(mutation.after_state or {})
+        repair_roots = {
+            root: copy.deepcopy(expected[root])
+            for root in ("parameters", "parameter_mappings")
+            if root in expected
+            and not (expected[root] == [] and root not in readback)
+            and not cls._requested_subset_matches(expected[root], readback.get(root))
+        }
+        if not repair_roots:
+            return {}
+        baseline = {key: value for key, value in expected.items() if key not in repair_roots}
+        if not cls._requested_subset_matches(baseline, readback):
+            return None
+        return repair_roots
+
     def _create_result(
         self,
         mutation: PlannedMutation,
@@ -3017,23 +3179,35 @@ class MetabaseRuntime:
         *,
         partial_stage: str | None = None,
     ) -> tuple[Outcome, dict[str, Any]]:
-        readback, readback_sha256 = self._created_readback(mutation, created_id)
         expected = copy.deepcopy(mutation.after_state or {})
         if mutation.target.get("create_kind") == "dashboard_clone":
             expected.pop("is_deep_copy", None)
-        matches = readback is not None and self._requested_subset_matches(expected, readback)
-        if matches and mutation.target.get("create_kind") == "dashboard_clone":
-            matches = bool(
-                len(readback.get("dashcards", []) or [])
-                == mutation.target.get("expected_dashcard_count")
-                and len(readback.get("tabs", []) or []) == mutation.target.get("expected_tab_count")
-            )
-        if matches:
-            outcome = Outcome.APPLIED_VERIFIED
-        elif partial_stage is not None or readback is not None:
-            outcome = Outcome.PARTIALLY_APPLIED
-        else:
-            outcome = Outcome.OUTCOME_UNKNOWN
+        readback: dict[str, Any] | None = None
+        readback_sha256: str | None = None
+        matches = False
+        reconciliation_attempts = 0
+        for attempt in range(1, MUTATION_RECONCILIATION_ATTEMPTS + 1):
+            reconciliation_attempts = attempt
+            readback, readback_sha256 = self._created_readback(mutation, created_id)
+            matches = readback is not None and self._requested_subset_matches(expected, readback)
+            if matches and mutation.target.get("create_kind") == "dashboard_clone":
+                matches = bool(
+                    len(readback.get("dashcards", []) or [])
+                    == mutation.target.get("expected_dashcard_count")
+                    and len(readback.get("tabs", []) or [])
+                    == mutation.target.get("expected_tab_count")
+                )
+            if matches:
+                break
+            if attempt < MUTATION_RECONCILIATION_ATTEMPTS:
+                time.sleep(MUTATION_RECONCILIATION_DELAY_SECONDS)
+        outcome = (
+            Outcome.APPLIED_VERIFIED
+            if matches
+            else Outcome.PARTIALLY_APPLIED
+            if partial_stage is not None or readback is not None
+            else Outcome.OUTCOME_UNKNOWN
+        )
         details = {
             "created_object_id": created_id,
             "object_results": [
@@ -3045,6 +3219,7 @@ class MetabaseRuntime:
                 }
             ],
             "applied_indexes": [0],
+            "reconciliation_attempts": reconciliation_attempts,
             "rollback_candidates": [],
             "cleanup_candidate": {
                 "object_type": mutation.object_type.value,
@@ -3098,12 +3273,15 @@ class MetabaseRuntime:
         if element_payload:
             try:
                 self.http.put_json(f"/api/dashboard/{created_id}", element_payload)
-            except MetabaseApiError:
-                return self._create_result(
+            except MetabaseApiError as exc:
+                outcome, details = self._create_result(
                     mutation,
                     created_id,
                     partial_stage="dashboard_shell_created_before_element_update",
                 )
+                details["reason"] = "dashboard_element_update_failed"
+                details["http_status"] = exc.status_code
+                return outcome, details
         return self._create_result(mutation, created_id)
 
     def _execute_simple_create(
@@ -3147,6 +3325,22 @@ class MetabaseRuntime:
                 "applied_indexes": [],
                 "rollback_candidates": [],
             }
+        if mutation.object_type is ObjectType.QUESTION:
+            readback, _ = self._created_readback(mutation, created_id)
+            repair_payload = (
+                self._question_create_repair_payload(mutation, readback)
+                if readback is not None
+                else None
+            )
+            if repair_payload:
+                try:
+                    self.http.put_json(f"/api/card/{created_id}", repair_payload)
+                except MetabaseApiError:
+                    return self._create_result(
+                        mutation,
+                        created_id,
+                        partial_stage="question_created_before_parameter_update",
+                    )
         return self._create_result(mutation, created_id)
 
     def _execute_field_values_rescan(

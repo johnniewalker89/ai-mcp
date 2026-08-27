@@ -405,6 +405,71 @@ def test_dashboard_create_applies_owned_elements(runtime) -> None:
     assert len(created["dashcards"]) == 1
 
 
+def test_dashboard_create_assigns_missing_temporary_dashcard_id(runtime) -> None:
+    service, fake = runtime
+    body = _dashboard_create_with_mapping()
+    body["dashcards"][0].pop("id")
+    fake.cards[1]["dataset_query"] = _v063_native_query()
+
+    prepared = service.dashboard_create_prepare(body)
+    mutation = service.plans.peek(prepared["plan_id"]).mutations[0]
+    assert mutation.write_payload["dashcards"][0]["id"] == -1
+
+    result = _execute(service, prepared, Action.DASHBOARD_CREATE)
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+
+
+def test_dashboard_create_assigns_and_links_single_missing_tab_id(runtime) -> None:
+    service, fake = runtime
+    body = _dashboard_create_with_mapping()
+    body["tabs"] = [{"name": "Overview"}]
+    body["dashcards"][0].pop("id")
+    fake.cards[1]["dataset_query"] = _v063_native_query()
+
+    prepared = service.dashboard_create_prepare(body)
+    mutation = service.plans.peek(prepared["plan_id"]).mutations[0]
+
+    assert mutation.write_payload["tabs"][0]["id"] == -1
+    assert mutation.write_payload["dashcards"][0]["id"] == -2
+    assert mutation.write_payload["dashcards"][0]["dashboard_tab_id"] == -1
+
+
+def test_dashboard_create_rejects_non_temporary_element_id(runtime) -> None:
+    service, _ = runtime
+    body = _dashboard_create_with_mapping()
+    body["dashcards"][0]["id"] = 1
+
+    with pytest.raises(MutationValidationError, match="temporary negative integers"):
+        service.dashboard_create_prepare(body)
+
+
+def test_dashboard_create_reports_safe_element_update_failure(runtime) -> None:
+    service, fake = runtime
+    fake.fail_put_call = 1
+    prepared = service.dashboard_create_prepare(
+        {
+            "name": "Dashboard with rejected elements",
+            "collection_id": 20,
+            "dashcards": [
+                {
+                    "card_id": 1,
+                    "row": 0,
+                    "col": 0,
+                    "size_x": 12,
+                    "size_y": 6,
+                }
+            ],
+        }
+    )
+
+    result = _execute(service, prepared, Action.DASHBOARD_CREATE)
+
+    assert result["outcome"] == Outcome.PARTIALLY_APPLIED.value
+    assert result["reason"] == "dashboard_element_update_failed"
+    assert result["http_status"] == 400
+
+
 def test_question_create_reconciles_legacy_native_canonicalization(runtime) -> None:
     service, fake = runtime
     original_post = fake.post_json
@@ -448,6 +513,71 @@ def test_question_create_reconciles_legacy_native_canonicalization(runtime) -> N
     assert fake.cards[result["created_object_id"]]["dataset_query"] == _v063_native_query()
 
 
+def test_question_create_repairs_parameters_ignored_by_post(runtime) -> None:
+    service, fake = runtime
+    original_post = fake.post_json
+
+    def post_without_parameters(path, body):  # noqa: ANN001, ANN202
+        accepted = copy.deepcopy(body)
+        if path == "/api/card":
+            accepted.pop("parameters", None)
+        return original_post(path, accepted)
+
+    fake.post_json = post_without_parameters
+    parameters = [
+        {
+            "id": "city",
+            "type": "string/=",
+            "target": ["variable", ["template-tag", "city"]],
+        }
+    ]
+    prepared = service.question_create_prepare(
+        {
+            "name": "Question with controls",
+            "dataset_query": _v063_native_query(),
+            "display": "table",
+            "collection_id": 20,
+            "parameters": parameters,
+        }
+    )
+
+    result = service.action_execute(prepared["plan_id"], prepared["digest"])
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert result["work_session"]["opened"] is True
+    assert fake.put_calls == 1
+    assert fake.cards[result["created_object_id"]]["parameters"] == parameters
+
+
+def test_question_create_reports_partial_when_parameter_repair_is_rejected(runtime) -> None:
+    service, fake = runtime
+    original_post = fake.post_json
+
+    def post_without_parameters(path, body):  # noqa: ANN001, ANN202
+        accepted = copy.deepcopy(body)
+        if path == "/api/card":
+            accepted.pop("parameters", None)
+        return original_post(path, accepted)
+
+    fake.post_json = post_without_parameters
+    fake.fail_put_call = 1
+    prepared = service.question_create_prepare(
+        {
+            "name": "Question with rejected controls",
+            "dataset_query": _v063_native_query(),
+            "display": "table",
+            "collection_id": 20,
+            "parameters": [{"id": "city", "type": "string/="}],
+        }
+    )
+
+    result = service.action_execute(prepared["plan_id"], prepared["digest"])
+
+    assert result["outcome"] == Outcome.PARTIALLY_APPLIED.value
+    assert result["partial_stage"] == "question_created_before_parameter_update"
+    assert result["cleanup_candidate"]["recommended_action"] == "trash_prepare"
+
+
 def test_dashboard_create_hydrates_mapped_question_and_binds_its_hash(runtime) -> None:
     service, fake = runtime
     fake.cards[1]["dataset_query"] = _v063_native_query()
@@ -463,6 +593,68 @@ def test_dashboard_create_hydrates_mapped_question_and_binds_its_hash(runtime) -
             "state_sha256": canonical_sha256(project_state(fake.cards[1], ObjectType.QUESTION)),
         }
     ]
+    mapping = mutation.write_payload["dashcards"][0]["parameter_mappings"][0]
+    assert mapping["card_id"] == 1
+    assert mapping["target"] == ["variable", ["template-tag", "city"]]
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+
+
+def test_dashboard_create_reconciliation_rejects_non_executable_saved_mapping(runtime) -> None:
+    service, fake = runtime
+    fake.cards[1]["dataset_query"] = _v063_native_query()
+    original_put = fake.put_json
+
+    def put_without_execution_binding(path, body):  # noqa: ANN001, ANN202
+        result = original_put(path, body)
+        if path.startswith("/api/dashboard/"):
+            for dashcard in fake.dashboards[int(path.rsplit("/", 1)[1])]["dashcards"]:
+                mapping = dashcard["parameter_mappings"][0]
+                mapping.pop("card_id", None)
+        return result
+
+    fake.put_json = put_without_execution_binding
+    prepared = service.dashboard_create_prepare(_dashboard_create_with_mapping())
+
+    result = _execute(service, prepared, Action.DASHBOARD_CREATE)
+
+    assert result["outcome"] == Outcome.PARTIALLY_APPLIED.value
+    assert result["cleanup_candidate"]["recommended_action"] == "trash_prepare"
+
+
+def test_dashboard_update_canonicalizes_mapping_from_authoritative_question(runtime) -> None:
+    service, fake = runtime
+    fake.cards[1]["dataset_query"] = _v063_native_query()
+    fake.dashboards[10]["parameters"] = [{"id": "city-param", "type": "string/=", "name": "City"}]
+    replacement = [
+        {
+            "id": 201,
+            "card_id": 1,
+            "row": 0,
+            "col": 0,
+            "size_x": 12,
+            "size_y": 6,
+            "dashboard_tab_id": 101,
+            "parameter_mappings": [
+                {
+                    "parameter_id": "city-param",
+                    "target": ["variable", ["template-tag", "city"]],
+                }
+            ],
+            "visualization_settings": {},
+        }
+    ]
+    prepared = service.dashboard_update_prepare(
+        10,
+        [{"op": "replace_array", "path": "/dashcards", "value": replacement}],
+    )
+    mutation = service.plans.peek(prepared["plan_id"]).mutations[0]
+
+    result = _execute(service, prepared, Action.DASHBOARD_UPDATE)
+
+    mapping = mutation.write_payload["dashcards"][0]["parameter_mappings"][0]
+    assert mapping["card_id"] == 1
+    assert mapping["target"] == ["variable", ["template-tag", "city"]]
+    assert "card" not in mutation.write_payload["dashcards"][0]
     assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
 
 
@@ -1375,6 +1567,52 @@ def test_full_question_session_updates_logic_and_runs_v063_native_preview(runtim
     assert queried["session"]["actions_used"] == 2
 
 
+def test_full_question_session_waits_for_canonical_readback_and_stays_active(
+    runtime,
+    monkeypatch,
+) -> None:
+    service, fake = runtime
+    stale = copy.deepcopy(fake.cards[1])
+    original_get = fake.get_json
+    original_put = fake.put_json
+    delayed_read_pending = False
+
+    def put_with_delayed_readback(path, body):  # noqa: ANN001, ANN202
+        nonlocal delayed_read_pending
+        result = original_put(path, body)
+        if path == "/api/card/1":
+            delayed_read_pending = True
+        return result
+
+    def get_with_delayed_readback(path, *, params=None):  # noqa: ANN001, ANN202
+        nonlocal delayed_read_pending
+        if path == "/api/card/1" and delayed_read_pending:
+            delayed_read_pending = False
+            return copy.deepcopy(stale)
+        return original_get(path, params=params)
+
+    monkeypatch.setattr("mcp_metabase.service.time.sleep", lambda _seconds: None)
+    fake.put_json = put_with_delayed_readback
+    fake.get_json = get_with_delayed_readback
+    opened = service.object_session_open("question", 1)
+
+    result = service.object_session_apply(
+        opened["session"]["session_id"],
+        [
+            {
+                "object_type": "question",
+                "object_id": 1,
+                "operations": [{"op": "set", "path": "/description", "value": "Settled"}],
+            }
+        ],
+    )
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert result["exact_action"]["object_results"][0]["reconciliation_attempts"] == 2
+    assert result["session"]["active"] is True
+    assert fake.cards[1]["description"] == "Settled"
+
+
 def test_dashboard_session_binds_and_updates_linked_question(runtime) -> None:
     service, fake = runtime
     fake.dashboards[10]["dashcards"] = [
@@ -1513,6 +1751,67 @@ def test_dashboard_session_rebinds_exact_graph_after_composition_change(runtime)
     assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
     assert bindings == {("dashboard", 10), ("question", 2)}
     assert fake.dashboards[10]["dashcards"] == replacement
+
+
+def test_dashboard_session_reconciles_server_assigned_element_ids(runtime) -> None:
+    service, fake = runtime
+    fake.dashboards[10]["tabs"] = []
+    original_put = fake.put_json
+
+    def put_with_server_ids(path, body):  # noqa: ANN001, ANN202
+        accepted = copy.deepcopy(body)
+        if path == "/api/dashboard/10":
+            accepted["tabs"][0].update({"id": 501, "dashboard_id": 10, "entity_id": "server-tab"})
+            accepted["dashcards"][0].update(
+                {
+                    "id": 601,
+                    "dashboard_id": 10,
+                    "dashboard_tab_id": 501,
+                    "entity_id": "server-card",
+                }
+            )
+        return original_put(path, accepted)
+
+    fake.put_json = put_with_server_ids
+    opened = service.object_session_open("dashboard", 10)
+    result = service.object_session_apply(
+        opened["session"]["session_id"],
+        [
+            {
+                "object_type": "dashboard",
+                "object_id": 10,
+                "operations": [
+                    {
+                        "op": "replace_array",
+                        "path": "/tabs",
+                        "value": [{"id": -1, "name": "Overview"}],
+                    },
+                    {
+                        "op": "replace_array",
+                        "path": "/dashcards",
+                        "value": [
+                            {
+                                "id": -2,
+                                "card_id": 1,
+                                "dashboard_tab_id": -1,
+                                "row": 0,
+                                "col": 0,
+                                "size_x": 12,
+                                "size_y": 6,
+                                "parameter_mappings": [],
+                                "visualization_settings": {},
+                            }
+                        ],
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert result["session"]["active"] is True
+    assert fake.dashboards[10]["tabs"][0]["id"] == 501
+    assert fake.dashboards[10]["dashcards"][0]["dashboard_tab_id"] == 501
 
 
 def test_dashboard_session_refreshes_primary_hash_after_linked_question_update(runtime) -> None:
