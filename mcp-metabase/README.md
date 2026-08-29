@@ -20,7 +20,7 @@ MCP-сервер для работы с Metabase через API key без бр�
 command = "<ABSOLUTE_PATH_TO_UVX>"
 args = [
   "--from",
-  "git+https://github.com/johnniewalker89/my-ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase",
+  "git+https://github.com/johnniewalker89/ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase",
   "mcp-metabase"
 ]
 startup_timeout_sec = 120
@@ -131,7 +131,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 Проверь установленный Git commit и подключение к Metabase:
 
 ```text
-<ABSOLUTE_PATH_TO_UVX> --from "git+https://github.com/johnniewalker89/my-ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase" mcp-metabase --check
+<ABSOLUTE_PATH_TO_UVX> --from "git+https://github.com/johnniewalker89/ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase" mcp-metabase --check
 ```
 
 После перезапуска клиента вызови `metabase_health`. При рабочей конфигурации он вернёт
