@@ -20,7 +20,7 @@ MCP-сервер для работы с Metabase через API key без бр�
 command = "<ABSOLUTE_PATH_TO_UVX>"
 args = [
   "--from",
-  "git+https://github.com/johnniewalker89/ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase",
+  "git+https://github.com/johnniewalker89/my-ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase",
   "mcp-metabase"
 ]
 startup_timeout_sec = 120
@@ -79,6 +79,9 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
   необходимыми правами, а не администратора.
 - Любое разовое изменение сначала готовится через `metabase_action_prepare`, затем
   отдельно подтверждается и выполняется через `metabase_action_execute`.
+- Если полное создание дашборда вернуло `500`, безопасный упрощённый вариант
+  выполняется в том же подтверждённом плане только после доказательства, что
+  исходный запрос ничего не создал. Неоднозначный результат останавливает запись.
 - Одно подтверждение рабочей сессии разрешает серию изменений только выбранного объекта
   или подтверждённого графа дашборда. Внешнее изменение блокирует дальнейшую запись до
   открытия новой сессии.
@@ -128,7 +131,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 Проверь установленный Git commit и подключение к Metabase:
 
 ```text
-<ABSOLUTE_PATH_TO_UVX> --from "git+https://github.com/johnniewalker89/ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase" mcp-metabase --check
+<ABSOLUTE_PATH_TO_UVX> --from "git+https://github.com/johnniewalker89/my-ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase" mcp-metabase --check
 ```
 
 После перезапуска клиента вызови `metabase_health`. При рабочей конфигурации он вернёт

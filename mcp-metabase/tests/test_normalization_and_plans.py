@@ -9,6 +9,7 @@ from mcp_metabase.normalization import (
     MutationValidationError,
     build_mutation,
     canonical_sha256,
+    project_state,
     verify_mutation,
 )
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
@@ -219,6 +220,42 @@ def test_null_is_not_remove_and_top_level_remove_is_forbidden() -> None:
             object_type=ObjectType.QUESTION,
             raw_before=_question(),
             operations=[PatchOperation(op="remove", path="/description")],
+        )
+
+
+def test_field_server_null_settings_normalizes_without_accepting_other_invalid_types() -> None:
+    raw = {
+        "id": 40,
+        "name": "city",
+        "display_name": "City",
+        "description": None,
+        "settings": None,
+        "table_id": 60,
+        "database_id": 50,
+    }
+
+    state = project_state(raw, ObjectType.FIELD)
+    mutation = build_mutation(
+        object_type=ObjectType.FIELD,
+        raw_before=raw,
+        operations=[PatchOperation(op="set", path="/display_name", value="City name")],
+    )
+
+    assert state["settings"] == {}
+    assert mutation.before_state["settings"] == {}
+    assert mutation.write_payload == {"display_name": "City name"}
+
+    missing = copy.deepcopy(raw)
+    missing.pop("settings")
+    assert "settings" not in project_state(missing, ObjectType.FIELD)
+
+    invalid = copy.deepcopy(raw)
+    invalid["settings"] = []
+    with pytest.raises(MutationValidationError, match="Field settings must be an object"):
+        build_mutation(
+            object_type=ObjectType.FIELD,
+            raw_before=invalid,
+            operations=[PatchOperation(op="set", path="/display_name", value="City name")],
         )
 
 

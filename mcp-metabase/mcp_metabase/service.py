@@ -129,6 +129,43 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.FIELD_VALUES_RESCAN: (frozenset({"database_id"}), frozenset()),
     Action.BATCH: (frozenset({"items"}), frozenset()),
 }
+COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
+    Action.QUESTION_CREATE: (
+        "arguments.body={name,dataset_query,display,visualization_settings?,collection_id?,"
+        "description?,parameters?,parameter_mappings?,cache_ttl?,type?}"
+    ),
+    Action.QUESTION_CLONE: ("arguments={source_question_id,name,collection_id?,to_root?}"),
+    Action.QUESTION_UPDATE: (
+        "arguments={question_id,operations:[{op,path,value?,item_id?,item_path?}]}"
+    ),
+    Action.QUESTION_TRASH: "arguments={question_id}",
+    Action.QUESTION_RESTORE: "arguments={question_id,collection_id?,to_root?}",
+    Action.DASHBOARD_CREATE: (
+        "arguments.body={name,collection_id?,description?,parameters?,cache_ttl?,width?,"
+        "dashcards?,tabs?}"
+    ),
+    Action.DASHBOARD_CLONE: (
+        "arguments={source_dashboard_id,name?,collection_id?,is_deep_copy?,to_root?}"
+    ),
+    Action.DASHBOARD_UPDATE: (
+        "arguments={dashboard_id,operations:[{op,path,value?,item_id?,item_path?}]}"
+    ),
+    Action.DASHBOARD_TRASH: "arguments={dashboard_id}",
+    Action.DASHBOARD_RESTORE: "arguments={dashboard_id,collection_id?,to_root?}",
+    Action.COLLECTION_CREATE: "arguments.body={name,description?,parent_id?}",
+    Action.COLLECTION_CLONE: "arguments={source_collection_id,name,parent_id?,to_root?}",
+    Action.COLLECTION_UPDATE: (
+        "arguments={collection_id,operations:[{op,path,value?,item_id?,item_path?}]}"
+    ),
+    Action.COLLECTION_TRASH: "arguments={collection_id}",
+    Action.COLLECTION_RESTORE: "arguments={collection_id,parent_id?,to_root?}",
+    Action.FIELD_UPDATE: ("arguments={field_id,operations:[{op,path,value?,item_id?,item_path?}]}"),
+    Action.FIELD_VALUES_RESCAN: "arguments={database_id}",
+    Action.BATCH: (
+        "arguments.items=[{object_type,object_id,operations:[{op,path,value?,item_id?,"
+        "item_path?}]}]"
+    ),
+}
 
 
 def _assign_dashboard_create_element_ids(payload: dict[str, Any]) -> None:
@@ -1855,6 +1892,39 @@ class MetabaseRuntime:
             "can_write": collection.get("can_write"),
         }
 
+    def _direct_collection_model_ids(
+        self,
+        collection_id: int | None,
+        *,
+        model: str,
+    ) -> list[int]:
+        reference: int | str = "root" if collection_id is None else collection_id
+        payload = self.http.get_json(
+            self._collection_path(reference, items=True),
+            params={
+                "archived": False,
+                "models": [model],
+                "limit": self.config.max_list_items,
+                "offset": 0,
+            },
+        )
+        items, total = self._list_payload(payload)
+        if len(items) > self.config.max_list_items or (total is not None and total > len(items)):
+            raise MutationValidationError(
+                "Metabase target collection exceeds the exact create-inventory bound."
+            )
+        result: list[int] = []
+        for item in items:
+            item_model = item.get("model")
+            item_id = item.get("id")
+            if not isinstance(item_model, str) or type(item_id) is not int or item_id <= 0:
+                raise MutationValidationError(
+                    "Metabase target collection inventory has no exact model/id."
+                )
+            if item_model == model:
+                result.append(item_id)
+        return sorted(result)
+
     def _prepare_plan(
         self,
         *,
@@ -1889,9 +1959,26 @@ class MetabaseRuntime:
         }
 
     @staticmethod
-    def _validation_error(exc: ValidationError) -> MutationValidationError:
+    def _validation_error(
+        exc: ValidationError,
+        *,
+        action: Action | None = None,
+        path_prefix: str | None = None,
+    ) -> MutationValidationError:
+        error = exc.errors()[0]
+        location = [str(item) for item in error.get("loc", ())]
+        if path_prefix:
+            location.insert(0, path_prefix)
+        invalid_path = ".".join(location) or "arguments"
+        reason = str(error.get("msg", "invalid value")).rstrip(".")
+        if action is None:
+            return MutationValidationError(
+                f"Metabase request validation failed at {invalid_path}: {reason}."
+            )
+        expected = COMPACT_ACTION_EXPECTED_SHAPES[action]
         return MutationValidationError(
-            f"Metabase request validation failed: {exc.errors()[0]['msg']}."
+            f"Metabase action {action.value} payload is invalid; "
+            f"invalid_path={invalid_path}; expected_shape={expected}; reason={reason}."
         )
 
     def question_create_prepare(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1899,7 +1986,11 @@ class MetabaseRuntime:
         try:
             request = QuestionCreate.model_validate(body)
         except ValidationError as exc:
-            raise self._validation_error(exc) from None
+            raise self._validation_error(
+                exc,
+                action=Action.QUESTION_CREATE,
+                path_prefix="arguments.body",
+            ) from None
         payload = request.model_dump(mode="json")
         target = self._collection_baseline(request.collection_id)
         target.update({"name": request.name, "create_kind": "question"})
@@ -1958,7 +2049,11 @@ class MetabaseRuntime:
         try:
             request = QuestionCreate.model_validate(body)
         except ValidationError as exc:
-            raise self._validation_error(exc) from None
+            raise self._validation_error(
+                exc,
+                action=Action.QUESTION_CLONE,
+                path_prefix="arguments",
+            ) from None
         payload = request.model_dump(mode="json")
         target = self._collection_baseline(request.collection_id)
         target.update(
@@ -1995,7 +2090,11 @@ class MetabaseRuntime:
         try:
             request = DashboardCreate.model_validate(body)
         except ValidationError as exc:
-            raise self._validation_error(exc) from None
+            raise self._validation_error(
+                exc,
+                action=Action.DASHBOARD_CREATE,
+                path_prefix="arguments.body",
+            ) from None
         payload = request.model_dump(mode="json")
         _assign_dashboard_create_element_ids(payload)
         for dashcard in payload.get("dashcards", []):
@@ -2039,6 +2138,13 @@ class MetabaseRuntime:
                 "name": request.name,
                 "create_kind": "dashboard",
                 "question_bindings": question_bindings,
+                "create_fallback": {
+                    "strategy": "minimal_shell_then_update",
+                    "dashboard_ids_before": self._direct_collection_model_ids(
+                        request.collection_id,
+                        model="dashboard",
+                    ),
+                },
             }
         )
         mutation = PlannedMutation(
@@ -2129,7 +2235,11 @@ class MetabaseRuntime:
         try:
             request = CollectionCreate.model_validate(body)
         except ValidationError as exc:
-            raise self._validation_error(exc) from None
+            raise self._validation_error(
+                exc,
+                action=Action.COLLECTION_CREATE,
+                path_prefix="arguments.body",
+            ) from None
         payload = request.model_dump(mode="json")
         target = self._collection_baseline(request.parent_id)
         target.update({"name": request.name, "create_kind": "collection"})
@@ -2178,7 +2288,11 @@ class MetabaseRuntime:
                 }
             )
         except ValidationError as exc:
-            raise self._validation_error(exc) from None
+            raise self._validation_error(
+                exc,
+                action=Action.COLLECTION_CLONE,
+                path_prefix="arguments",
+            ) from None
         payload = request.model_dump(mode="json")
         target = self._collection_baseline(request.parent_id)
         target.update(
@@ -2211,17 +2325,35 @@ class MetabaseRuntime:
         )
 
     @staticmethod
-    def _parse_operations(raw_operations: list[dict[str, Any]]) -> list[PatchOperation]:
+    def _parse_operations(
+        raw_operations: list[dict[str, Any]],
+        *,
+        action: Action | None = None,
+    ) -> list[PatchOperation]:
         if not isinstance(raw_operations, list) or not 1 <= len(raw_operations) <= 100:
+            if action is not None:
+                raise MutationValidationError(
+                    f"Metabase action {action.value} payload is invalid; "
+                    "invalid_path=arguments.operations; "
+                    f"expected_shape={COMPACT_ACTION_EXPECTED_SHAPES[action]}; "
+                    "reason=operations must contain between 1 and 100 items."
+                )
             raise MutationValidationError(
                 "Metabase patch operations must contain between 1 and 100 items."
             )
-        try:
-            return [PatchOperation.model_validate(item) for item in raw_operations]
-        except ValidationError as exc:
-            raise MutationValidationError(
-                f"Metabase patch validation failed: {exc.errors()[0]['msg']}."
-            ) from None
+        operations: list[PatchOperation] = []
+        for index, item in enumerate(raw_operations):
+            try:
+                operation = PatchOperation.model_validate(item)
+            except ValidationError as exc:
+                prefix = f"arguments.operations.{index}" if action else f"operations.{index}"
+                raise MetabaseRuntime._validation_error(
+                    exc,
+                    action=action,
+                    path_prefix=prefix,
+                ) from None
+            operations.append(operation)
+        return operations
 
     def _inventory_collection_tree(self, collection_id: int) -> dict[str, Any]:
         root_id = self._positive_id(collection_id, "collection id")
@@ -2281,7 +2413,7 @@ class MetabaseRuntime:
         action: Action,
     ) -> dict[str, Any]:
         context = self._write_context()
-        operations = self._parse_operations(raw_operations)
+        operations = self._parse_operations(raw_operations, action=action)
         raw = self._object_raw(object_type, object_id)
         mutation = self._build_runtime_mutation(
             object_type=object_type,
@@ -2534,11 +2666,22 @@ class MetabaseRuntime:
             not isinstance(raw_items, list)
             or not 1 <= len(raw_items) <= self.config.max_batch_items
         ):
-            raise MutationValidationError("Metabase batch size is outside the configured bound.")
-        try:
-            items = [BatchUpdateItem.model_validate(item) for item in raw_items]
-        except ValidationError as exc:
-            raise self._validation_error(exc) from None
+            raise MutationValidationError(
+                "Metabase action batch payload is invalid; "
+                "invalid_path=arguments.items; "
+                f"expected_shape={COMPACT_ACTION_EXPECTED_SHAPES[Action.BATCH]}; "
+                "reason=batch size is outside the configured bound."
+            )
+        items: list[BatchUpdateItem] = []
+        for index, item in enumerate(raw_items):
+            try:
+                items.append(BatchUpdateItem.model_validate(item))
+            except ValidationError as exc:
+                raise self._validation_error(
+                    exc,
+                    action=Action.BATCH,
+                    path_prefix=f"arguments.items.{index}",
+                ) from None
         bindings = [(item.object_type, item.object_id) for item in items]
         if len(set(bindings)) != len(bindings):
             raise MutationValidationError("Metabase batch contains a duplicate object binding.")
@@ -3231,6 +3374,48 @@ class MetabaseRuntime:
             details["partial_stage"] = partial_stage
         return outcome, details
 
+    def _dashboard_create_primary_absent(
+        self,
+        mutation: PlannedMutation,
+    ) -> tuple[bool, dict[str, Any]]:
+        fallback = mutation.target.get("create_fallback")
+        if not isinstance(fallback, dict) or fallback.get("strategy") != (
+            "minimal_shell_then_update"
+        ):
+            raise MetabasePolicyError("Metabase dashboard create fallback binding is invalid.")
+        before = fallback.get("dashboard_ids_before")
+        if (
+            not isinstance(before, list)
+            or any(type(item) is not int or item <= 0 for item in before)
+            or before != sorted(set(before))
+        ):
+            raise MetabasePolicyError("Metabase dashboard create inventory binding is invalid.")
+
+        attempts = 0
+        for attempt in range(1, MUTATION_RECONCILIATION_ATTEMPTS + 1):
+            attempts = attempt
+            try:
+                current = self._direct_collection_model_ids(
+                    mutation.target.get("collection_id"),
+                    model="dashboard",
+                )
+            except (MetabaseApiError, MutationValidationError):
+                return False, {
+                    "primary_absence_readback": "unavailable",
+                    "reconciliation_attempts": attempts,
+                }
+            if current != before:
+                return False, {
+                    "primary_absence_readback": "inventory_changed",
+                    "reconciliation_attempts": attempts,
+                }
+            if attempt < MUTATION_RECONCILIATION_ATTEMPTS:
+                time.sleep(MUTATION_RECONCILIATION_DELAY_SECONDS)
+        return True, {
+            "primary_absence_readback": "verified_absent",
+            "reconciliation_attempts": attempts,
+        }
+
     def _execute_dashboard_create(
         self, mutation: PlannedMutation
     ) -> tuple[Outcome, dict[str, Any]]:
@@ -3251,18 +3436,57 @@ class MetabaseRuntime:
             for key in ("width", "dashcards", "tabs")
             if key in mutation.write_payload and mutation.write_payload[key] not in (None, [])
         }
+        fallback_used = False
+        primary_status: int | None = None
+        fallback_readback: dict[str, Any] = {}
         try:
             response = self.http.post_json("/api/dashboard", create_payload)
         except MetabaseApiError as exc:
-            outcome = (
-                Outcome.OUTCOME_UNKNOWN if exc.outcome_unknown else Outcome.REJECTED_VALIDATION
-            )
-            return outcome, {
-                "object_results": [],
-                "http_status": exc.status_code,
-                "applied_indexes": [],
-                "rollback_candidates": [],
+            primary_status = exc.status_code
+            if not exc.outcome_unknown or exc.status_code != 500:
+                outcome = (
+                    Outcome.OUTCOME_UNKNOWN if exc.outcome_unknown else Outcome.REJECTED_VALIDATION
+                )
+                return outcome, {
+                    "object_results": [],
+                    "http_status": exc.status_code,
+                    "applied_indexes": [],
+                    "rollback_candidates": [],
+                }
+            absent, fallback_readback = self._dashboard_create_primary_absent(mutation)
+            if not absent:
+                return Outcome.OUTCOME_UNKNOWN, {
+                    "object_results": [],
+                    "http_status": exc.status_code,
+                    "reason": "dashboard_create_primary_ambiguous_after_readback",
+                    "applied_indexes": [],
+                    "rollback_candidates": [],
+                    **fallback_readback,
+                }
+            fallback_used = True
+            minimal_payload = {
+                key: copy.deepcopy(mutation.write_payload[key])
+                for key in ("name", "description", "collection_id")
+                if key in mutation.write_payload
             }
+            try:
+                response = self.http.post_json("/api/dashboard", minimal_payload)
+            except MetabaseApiError as fallback_exc:
+                outcome = (
+                    Outcome.OUTCOME_UNKNOWN
+                    if fallback_exc.outcome_unknown
+                    else Outcome.REJECTED_VALIDATION
+                )
+                return outcome, {
+                    "object_results": [],
+                    "http_status": fallback_exc.status_code,
+                    "primary_http_status": primary_status,
+                    "reason": "dashboard_create_minimal_fallback_failed",
+                    "create_strategy": "minimal_shell_fallback",
+                    "applied_indexes": [],
+                    "rollback_candidates": [],
+                    **fallback_readback,
+                }
         created_id = self._created_id(response)
         if created_id is None:
             return Outcome.OUTCOME_UNKNOWN, {
@@ -3270,19 +3494,51 @@ class MetabaseRuntime:
                 "applied_indexes": [],
                 "rollback_candidates": [],
             }
-        if element_payload:
+        update_payload = element_payload
+        if fallback_used:
+            update_payload = {
+                key: copy.deepcopy(mutation.write_payload[key])
+                for key in ("parameters", "cache_ttl", "width", "dashcards", "tabs")
+                if key in mutation.write_payload
+                and (
+                    key in {"parameters", "cache_ttl"}
+                    or mutation.write_payload[key] not in (None, [])
+                )
+            }
+        if update_payload:
             try:
-                self.http.put_json(f"/api/dashboard/{created_id}", element_payload)
+                self.http.put_json(f"/api/dashboard/{created_id}", update_payload)
             except MetabaseApiError as exc:
                 outcome, details = self._create_result(
                     mutation,
                     created_id,
-                    partial_stage="dashboard_shell_created_before_element_update",
+                    partial_stage=(
+                        "dashboard_shell_created_before_fallback_update"
+                        if fallback_used
+                        else "dashboard_shell_created_before_element_update"
+                    ),
                 )
                 details["reason"] = "dashboard_element_update_failed"
                 details["http_status"] = exc.status_code
+                if fallback_used:
+                    details.update(
+                        {
+                            "create_strategy": "minimal_shell_fallback",
+                            "primary_http_status": primary_status,
+                            **fallback_readback,
+                        }
+                    )
                 return outcome, details
-        return self._create_result(mutation, created_id)
+        outcome, details = self._create_result(mutation, created_id)
+        if fallback_used:
+            details.update(
+                {
+                    "create_strategy": "minimal_shell_fallback",
+                    "primary_http_status": primary_status,
+                    **fallback_readback,
+                }
+            )
+        return outcome, details
 
     def _execute_simple_create(
         self,

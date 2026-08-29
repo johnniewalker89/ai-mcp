@@ -18,6 +18,7 @@ from mcp_metabase.plans import MetabasePolicyError
 from mcp_metabase.service import (
     COMPACT_ACTION_ARGUMENT_KEYS,
     COMPACT_MUTATION_ACTIONS,
+    MUTATION_RECONCILIATION_ATTEMPTS,
     MetabaseRuntime,
 )
 
@@ -468,6 +469,104 @@ def test_dashboard_create_reports_safe_element_update_failure(runtime) -> None:
     assert result["outcome"] == Outcome.PARTIALLY_APPLIED.value
     assert result["reason"] == "dashboard_element_update_failed"
     assert result["http_status"] == 400
+
+
+def test_dashboard_create_uses_same_plan_for_verified_empty_500_fallback(runtime) -> None:
+    service, fake = runtime
+    original_post = fake.post_json
+    first_dashboard_post = True
+
+    def post_with_initial_500(path, body):  # noqa: ANN001, ANN202
+        nonlocal first_dashboard_post
+        if path == "/api/dashboard" and first_dashboard_post:
+            first_dashboard_post = False
+            fake.post_calls += 1
+            raise MetabaseApiError(
+                "simulated ambiguous server failure",
+                status_code=500,
+                outcome_unknown=True,
+            )
+        return original_post(path, body)
+
+    fake.post_json = post_with_initial_500
+    prepared = service.dashboard_create_prepare(
+        {
+            "name": "Dashboard with one-plan fallback",
+            "collection_id": 20,
+            "parameters": [{"id": "period", "type": "date/all-options"}],
+            "cache_ttl": 60,
+            "width": "full",
+        }
+    )
+
+    result = _execute(service, prepared, Action.DASHBOARD_CREATE)
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert result["create_strategy"] == "minimal_shell_fallback"
+    assert result["primary_http_status"] == 500
+    assert result["primary_absence_readback"] == "verified_absent"
+    assert result["reconciliation_attempts"] == MUTATION_RECONCILIATION_ATTEMPTS
+    assert fake.post_calls == 2
+    assert fake.put_calls == 1
+    created = fake.dashboards[result["created_object_id"]]
+    assert created["width"] == "full"
+    assert created["cache_ttl"] == 60
+    assert created["parameters"] == [{"id": "period", "type": "date/all-options"}]
+
+
+def test_dashboard_create_does_not_fallback_when_500_readback_changed(runtime) -> None:
+    service, fake = runtime
+    original_post = fake.post_json
+    first_dashboard_post = True
+
+    def post_creates_then_raises(path, body):  # noqa: ANN001, ANN202
+        nonlocal first_dashboard_post
+        if path == "/api/dashboard" and first_dashboard_post:
+            first_dashboard_post = False
+            original_post(path, body)
+            raise MetabaseApiError(
+                "simulated post-commit server failure",
+                status_code=500,
+                outcome_unknown=True,
+            )
+        return original_post(path, body)
+
+    fake.post_json = post_creates_then_raises
+    prepared = service.dashboard_create_prepare(
+        {
+            "name": "Ambiguous dashboard",
+            "collection_id": 20,
+            "width": "full",
+        }
+    )
+
+    result = _execute(service, prepared, Action.DASHBOARD_CREATE)
+
+    assert result["outcome"] == Outcome.OUTCOME_UNKNOWN.value
+    assert result["reason"] == "dashboard_create_primary_ambiguous_after_readback"
+    assert result["primary_absence_readback"] == "inventory_changed"
+    assert fake.post_calls == 1
+    assert fake.put_calls == 0
+    assert len(fake.dashboards) == 2
+
+
+def test_dashboard_create_does_not_retry_transport_unknown_without_http_500(runtime) -> None:
+    service, fake = runtime
+
+    def post_transport_unknown(path, body):  # noqa: ANN001, ANN202, ARG001
+        fake.post_calls += 1
+        raise MetabaseApiError("simulated transport failure", outcome_unknown=True)
+
+    fake.post_json = post_transport_unknown
+    prepared = service.dashboard_create_prepare(
+        {"name": "Transport unknown dashboard", "collection_id": 20, "width": "full"}
+    )
+
+    result = _execute(service, prepared, Action.DASHBOARD_CREATE)
+
+    assert result["outcome"] == Outcome.OUTCOME_UNKNOWN.value
+    assert fake.post_calls == 1
+    assert fake.put_calls == 0
 
 
 def test_question_create_reconciles_legacy_native_canonicalization(runtime) -> None:
@@ -1482,6 +1581,46 @@ def test_compact_action_prepare_explains_create_argument_wrapper(runtime) -> Non
     assert "required keys [body]" in message
     assert "unknown [description, name, parent_id]" in message
     assert "arguments.body" in message
+    assert fake.post_calls == 0
+
+
+def test_compact_action_prepare_reports_action_shape_and_invalid_field_path(runtime) -> None:
+    service, fake = runtime
+
+    with pytest.raises(MutationValidationError) as raised:
+        service.action_prepare(
+            "dashboard_create",
+            {"body": {"name": "Invalid width", "collection_id": 20, "width": "wide"}},
+        )
+
+    message = str(raised.value)
+    assert "Metabase action dashboard_create payload is invalid" in message
+    assert "invalid_path=arguments.body.width" in message
+    assert "expected_shape=arguments.body={name,collection_id?" in message
+    assert fake.post_calls == 0
+
+
+def test_compact_batch_prepare_reports_nested_item_path(runtime) -> None:
+    service, fake = runtime
+
+    with pytest.raises(MutationValidationError) as raised:
+        service.action_prepare(
+            "batch_update",
+            {
+                "items": [
+                    {
+                        "object_type": "field",
+                        "object_id": 0,
+                        "operations": [{"op": "set", "path": "/display_name", "value": "City"}],
+                    }
+                ]
+            },
+        )
+
+    message = str(raised.value)
+    assert "Metabase action batch payload is invalid" in message
+    assert "invalid_path=arguments.items.0.object_id" in message
+    assert "expected_shape=arguments.items=[" in message
     assert fake.post_calls == 0
 
 

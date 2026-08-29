@@ -315,6 +315,11 @@ def project_state(raw: dict[str, Any], object_type: ObjectType) -> dict[str, Any
     state = {
         field: copy.deepcopy(raw[field]) for field in STATE_FIELDS[object_type] if field in raw
     }
+    # Metabase may persist an unset field-settings map as JSON null. Treat only
+    # that authoritative server representation as the empty settings object;
+    # other invalid non-object values must still fail validation.
+    if object_type is ObjectType.FIELD and "settings" in state and state["settings"] is None:
+        state["settings"] = {}
     if type(state.get("id")) is not int or state["id"] <= 0:
         raise MutationValidationError("Metabase object has no positive immutable id.")
     return state
