@@ -526,7 +526,7 @@ def metabase_batch_update_prepare(items: list[dict[str, Any]]) -> dict[str, Any]
 
 @mcp.tool()
 def metabase_batch_update_execute(plan_id: str, digest: str) -> dict[str, Any]:
-    """Apply the exact batch, stopping at first failure; requires explicit approval."""
+    """Apply the exact batch with bounded same-plan recovery; requires explicit approval."""
     return _execute(plan_id, digest, Action.BATCH)
 
 

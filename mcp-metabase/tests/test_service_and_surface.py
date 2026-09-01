@@ -340,6 +340,162 @@ def test_batch_prechecks_every_target_before_first_write(runtime) -> None:
     assert fake.put_calls == 0
 
 
+def _prepare_three_item_batch(service: MetabaseRuntime) -> dict[str, Any]:
+    return service.batch_prepare(
+        [
+            {
+                "object_type": "question",
+                "object_id": 1,
+                "operations": [{"op": "set", "path": "/name", "value": "Changed"}],
+            },
+            {
+                "object_type": "dashboard",
+                "object_id": 10,
+                "operations": [
+                    {"op": "set", "path": "/description", "value": "Recovered"}
+                ],
+            },
+            {
+                "object_type": "collection",
+                "object_id": 20,
+                "operations": [
+                    {"op": "set", "path": "/description", "value": "Remaining"}
+                ],
+            },
+        ]
+    )
+
+
+def _install_ambiguous_second_write(
+    fake: StatefulApi,
+    *,
+    applied_before_error: bool,
+    drift_third: bool = False,
+    fail_third_readback: bool = False,
+) -> None:
+    original_get = fake.get_json
+    original_put = fake.put_json
+    state = {
+        "triggered": False,
+        "blocked_readbacks": 0,
+        "blocked_third_readbacks": 0,
+    }
+
+    def get_with_initial_reconciliation_failure(
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/api/dashboard/10" and state["blocked_readbacks"] > 0:
+            state["blocked_readbacks"] -= 1
+            raise MetabaseApiError("simulated readback failure", outcome_unknown=True)
+        if path == "/api/collection/20" and state["blocked_third_readbacks"] > 0:
+            state["blocked_third_readbacks"] -= 1
+            raise MetabaseApiError("simulated persistent readback failure", outcome_unknown=True)
+        return original_get(path, params=params)
+
+    def put_with_ambiguous_second_write(path: str, body: dict[str, Any]) -> Any:
+        if path == "/api/dashboard/10" and not state["triggered"]:
+            state["triggered"] = True
+            if applied_before_error:
+                original_put(path, body)
+            else:
+                fake.put_calls += 1
+            state["blocked_readbacks"] = MUTATION_RECONCILIATION_ATTEMPTS
+            if drift_third:
+                fake.collections[20]["description"] = "External drift"
+                fake.collections[20]["updated_at"] = "external-change"
+            if fail_third_readback:
+                state["blocked_third_readbacks"] = MUTATION_RECONCILIATION_ATTEMPTS
+            raise MetabaseApiError(
+                "simulated ambiguous write",
+                status_code=503,
+                outcome_unknown=True,
+            )
+        return original_put(path, body)
+
+    fake.get_json = get_with_initial_reconciliation_failure
+    fake.put_json = put_with_ambiguous_second_write
+
+
+def test_batch_unknown_readback_skips_objects_already_applied(runtime) -> None:
+    service, fake = runtime
+    plan = _prepare_three_item_batch(service)
+    _install_ambiguous_second_write(fake, applied_before_error=True)
+
+    result = _execute(service, plan, Action.BATCH)
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert result["recovery_attempted"] is True
+    assert result["full_inventory_readback_completed"] is True
+    assert result["verified_already_applied_indexes"] == [0, 1]
+    assert result["recovery_write_indexes"] == [2]
+    assert result["applied_indexes"] == [0, 1, 2]
+    assert fake.put_calls == 3
+    assert fake.cards[1]["name"] == "Changed"
+    assert fake.dashboards[10]["description"] == "Recovered"
+    assert fake.collections[20]["description"] == "Remaining"
+
+
+def test_batch_unknown_reapplies_only_verified_not_applied_objects(runtime) -> None:
+    service, fake = runtime
+    plan = _prepare_three_item_batch(service)
+    _install_ambiguous_second_write(fake, applied_before_error=False)
+
+    result = _execute(service, plan, Action.BATCH)
+
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert result["verified_already_applied_indexes"] == [0]
+    assert result["recovery_write_indexes"] == [1, 2]
+    assert result["applied_indexes"] == [0, 1, 2]
+    assert fake.put_calls == 4
+    assert fake.dashboards[10]["description"] == "Recovered"
+    assert fake.collections[20]["description"] == "Remaining"
+
+
+def test_batch_unknown_drift_blocks_all_recovery_writes(runtime) -> None:
+    service, fake = runtime
+    plan = _prepare_three_item_batch(service)
+    _install_ambiguous_second_write(
+        fake,
+        applied_before_error=False,
+        drift_third=True,
+    )
+
+    result = _execute(service, plan, Action.BATCH)
+
+    assert result["outcome"] == Outcome.PARTIALLY_APPLIED.value
+    assert result["recovery_completed"] is False
+    assert result["recovery_blocked_reason"] == "inconclusive_full_inventory_readback"
+    assert result["inconclusive_indexes"] == [2]
+    assert result["recovery_write_indexes"] == []
+    assert result["unattempted_indexes"] == [2]
+    assert fake.put_calls == 2
+    assert fake.dashboards[10]["description"] is None
+    assert fake.collections[20]["description"] == "External drift"
+
+
+def test_batch_unknown_readback_failure_blocks_all_recovery_writes(runtime) -> None:
+    service, fake = runtime
+    plan = _prepare_three_item_batch(service)
+    _install_ambiguous_second_write(
+        fake,
+        applied_before_error=False,
+        fail_third_readback=True,
+    )
+
+    result = _execute(service, plan, Action.BATCH)
+
+    assert result["outcome"] == Outcome.PARTIALLY_APPLIED.value
+    assert result["recovery_completed"] is False
+    assert result["recovery_blocked_reason"] == "inconclusive_full_inventory_readback"
+    assert result["inconclusive_indexes"] == [2]
+    assert result["recovery_write_indexes"] == []
+    assert fake.put_calls == 2
+    assert fake.dashboards[10]["description"] is None
+    assert fake.collections[20]["description"] is None
+
+
 def test_partial_batch_exposes_and_executes_exact_rollback(runtime) -> None:
     service, fake = runtime
     plan = service.batch_prepare(

@@ -3147,6 +3147,163 @@ class MetabaseRuntime:
             ),
         }
 
+    def _recover_batch_after_unknown(
+        self,
+        plan: ExactPlan,
+        *,
+        initial_object_results: list[dict[str, Any]],
+        initial_applied_indexes: list[int],
+        write_attempted_indexes: set[int],
+        failure_index: int,
+    ) -> tuple[Outcome, dict[str, Any]]:
+        """Reconcile the whole batch before any bounded same-plan recovery writes."""
+        object_results: list[dict[str, Any]] = []
+        readback_outcomes: list[Outcome] = []
+        for index, mutation in enumerate(plan.mutations):
+            readback_result = self._reconcile_update(mutation, request_error=None)
+            readback_result["index"] = index
+            readback_result["recovery_phase"] = "full_inventory_readback"
+            object_results.append(readback_result)
+            readback_outcomes.append(Outcome(str(readback_result["outcome"])))
+
+        applied_indexes = {
+            index
+            for index, outcome in enumerate(readback_outcomes)
+            if outcome is Outcome.APPLIED_VERIFIED
+        }
+        verified_already_applied_indexes = sorted(applied_indexes)
+        inconclusive_indexes = [
+            index
+            for index, outcome in enumerate(readback_outcomes)
+            if outcome not in {Outcome.APPLIED_VERIFIED, Outcome.NOT_APPLIED_VERIFIED}
+        ]
+        if inconclusive_indexes:
+            for index, result in enumerate(object_results):
+                result["recovery_action"] = (
+                    "blocked_inconclusive_readback"
+                    if index in inconclusive_indexes
+                    else "readback_only"
+                )
+            overall = (
+                Outcome.PARTIALLY_APPLIED if applied_indexes else Outcome.OUTCOME_UNKNOWN
+            )
+            return overall, {
+                "object_results": object_results,
+                "initial_object_results": initial_object_results,
+                "initial_applied_indexes": initial_applied_indexes,
+                "applied_indexes": sorted(applied_indexes),
+                "stopped_after_index": failure_index,
+                "unattempted_indexes": [
+                    index
+                    for index in range(len(plan.mutations))
+                    if index not in write_attempted_indexes
+                ],
+                "rollback_candidates": [
+                    {
+                        "index": index,
+                        "object_type": plan.mutations[index].object_type.value,
+                        "object_id": plan.mutations[index].object_id,
+                    }
+                    for index in sorted(applied_indexes)
+                ],
+                "recovery_attempted": True,
+                "recovery_completed": False,
+                "recovery_reason": "batch_item_outcome_unknown",
+                "recovery_blocked_reason": "inconclusive_full_inventory_readback",
+                "full_inventory_readback_completed": True,
+                "inconclusive_indexes": inconclusive_indexes,
+                "verified_already_applied_indexes": verified_already_applied_indexes,
+                "recovery_write_indexes": [],
+            }
+
+        recovery_write_indexes: list[int] = []
+        terminal_failure: Outcome | None = None
+        terminal_index: int | None = None
+        for index, mutation in enumerate(plan.mutations):
+            if readback_outcomes[index] is Outcome.APPLIED_VERIFIED:
+                object_results[index]["recovery_action"] = "skipped_already_applied"
+                continue
+            try:
+                fresh, _ = self._mutation_preflight(mutation)
+            except (MetabaseApiError, MutationValidationError):
+                object_results[index] = {
+                    "object_type": mutation.object_type.value,
+                    "object_id": mutation.object_id,
+                    "outcome": Outcome.OUTCOME_UNKNOWN.value,
+                    "index": index,
+                    "recovery_phase": "individual_apply_preflight",
+                    "recovery_action": "blocked_preflight_readback_failure",
+                }
+                terminal_failure = Outcome.OUTCOME_UNKNOWN
+                terminal_index = index
+                break
+            if not fresh:
+                object_results[index] = {
+                    "object_type": mutation.object_type.value,
+                    "object_id": mutation.object_id,
+                    "outcome": Outcome.REJECTED_STALE.value,
+                    "index": index,
+                    "recovery_phase": "individual_apply_preflight",
+                    "recovery_action": "blocked_stale_before_individual_apply",
+                }
+                terminal_failure = Outcome.REJECTED_STALE
+                terminal_index = index
+                break
+
+            write_attempted_indexes.add(index)
+            recovery_write_indexes.append(index)
+            item_result = self._apply_update(mutation)
+            item_result["index"] = index
+            item_result["recovery_phase"] = "individual_apply"
+            item_result["recovery_action"] = "applied_individually"
+            object_results[index] = item_result
+            item_outcome = Outcome(str(item_result["outcome"]))
+            if item_outcome is Outcome.APPLIED_VERIFIED:
+                applied_indexes.add(index)
+                continue
+            terminal_failure = item_outcome
+            terminal_index = index
+            break
+
+        if len(applied_indexes) == len(plan.mutations):
+            overall = Outcome.APPLIED_VERIFIED
+        elif applied_indexes:
+            overall = Outcome.PARTIALLY_APPLIED
+        else:
+            overall = terminal_failure or Outcome.NOT_APPLIED_VERIFIED
+        return overall, {
+            "object_results": object_results,
+            "initial_object_results": initial_object_results,
+            "initial_applied_indexes": initial_applied_indexes,
+            "applied_indexes": sorted(applied_indexes),
+            "stopped_after_index": (
+                terminal_index if terminal_index is not None else len(plan.mutations) - 1
+            ),
+            "unattempted_indexes": [
+                index
+                for index in range(len(plan.mutations))
+                if index not in write_attempted_indexes
+            ],
+            "rollback_candidates": [
+                {
+                    "index": index,
+                    "object_type": plan.mutations[index].object_type.value,
+                    "object_id": plan.mutations[index].object_id,
+                }
+                for index in sorted(applied_indexes)
+            ],
+            "recovery_attempted": True,
+            "recovery_completed": overall is Outcome.APPLIED_VERIFIED,
+            "recovery_reason": "batch_item_outcome_unknown",
+            "recovery_blocked_reason": (
+                None if overall is Outcome.APPLIED_VERIFIED else "individual_apply_failed"
+            ),
+            "full_inventory_readback_completed": True,
+            "inconclusive_indexes": [],
+            "verified_already_applied_indexes": verified_already_applied_indexes,
+            "recovery_write_indexes": recovery_write_indexes,
+        }
+
     def _execute_batch(self, plan: ExactPlan) -> tuple[Outcome, dict[str, Any]]:
         for index, mutation in enumerate(plan.mutations):
             fresh, _ = self._mutation_preflight(mutation)
@@ -3167,6 +3324,7 @@ class MetabaseRuntime:
 
         object_results: list[dict[str, Any]] = []
         applied_indexes: list[int] = []
+        write_attempted_indexes: set[int] = set()
         terminal_failure: Outcome | None = None
         for index, mutation in enumerate(plan.mutations):
             fresh, _ = self._mutation_preflight(mutation)
@@ -3181,6 +3339,7 @@ class MetabaseRuntime:
                 )
                 terminal_failure = Outcome.REJECTED_STALE
                 break
+            write_attempted_indexes.add(index)
             item_result = self._apply_update(mutation)
             item_result["index"] = index
             object_results.append(item_result)
@@ -3189,6 +3348,14 @@ class MetabaseRuntime:
                 applied_indexes.append(index)
                 continue
             terminal_failure = item_outcome
+            if item_outcome is Outcome.OUTCOME_UNKNOWN:
+                return self._recover_batch_after_unknown(
+                    plan,
+                    initial_object_results=[dict(result) for result in object_results],
+                    initial_applied_indexes=list(applied_indexes),
+                    write_attempted_indexes=write_attempted_indexes,
+                    failure_index=index,
+                )
             break
 
         if len(applied_indexes) == len(plan.mutations):
