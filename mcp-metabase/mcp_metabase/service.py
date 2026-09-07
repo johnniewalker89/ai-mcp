@@ -494,6 +494,58 @@ class MetabaseRuntime:
     def dashboard_get_full(self, dashboard_id: int) -> dict[str, Any]:
         return self._full_object(ObjectType.DASHBOARD, dashboard_id)
 
+    def dashboard_get_layout(self, dashboard_id: int) -> dict[str, Any]:
+        full = self.dashboard_get_full(dashboard_id)
+        raw = full["object"]
+        tabs = raw.get("tabs")
+        cards = raw.get("dashcards")
+        if (
+            "tabs" not in raw
+            or (tabs is not None and not isinstance(tabs, list))
+            or (isinstance(tabs, list) and any(not isinstance(tab, dict) for tab in tabs))
+            or not isinstance(cards, list)
+        ):
+            raise MutationValidationError(
+                "Metabase dashboard layout inventory has an invalid shape."
+            )
+        dashcards = []
+        for card in cards:
+            if not isinstance(card, dict) or any(
+                type(card.get(key)) is not int for key in ("id", "col", "row", "size_x", "size_y")
+            ):
+                raise MutationValidationError(
+                    "Metabase dashboard dashcard layout has an invalid shape."
+                )
+            nested_card = card.get("card")
+            if nested_card is not None and not isinstance(nested_card, dict):
+                raise MutationValidationError(
+                    "Metabase dashboard embedded card has an invalid shape."
+                )
+            dashcards.append(
+                {
+                    key: copy.deepcopy(card.get(key))
+                    for key in (
+                        "id",
+                        "card_id",
+                        "dashboard_tab_id",
+                        "col",
+                        "row",
+                        "size_x",
+                        "size_y",
+                    )
+                }
+                | {"name": (nested_card or {}).get("name")}
+            )
+        return {key: value for key, value in full.items() if key != "object"} | {
+            "projection": "layout",
+            "layout": {
+                "name": raw.get("name"),
+                "width": raw.get("width"),
+                "tabs": copy.deepcopy(tabs),
+                "dashcards": dashcards,
+            },
+        }
+
     def object_get(
         self,
         object_type: str,
@@ -501,9 +553,14 @@ class MetabaseRuntime:
         *,
         include_fields: bool = True,
         limit: int = 100,
+        view: str = "full",
     ) -> dict[str, Any]:
         """Read one typed object through a compact, closed dispatcher."""
 
+        if view not in ("full", "layout"):
+            raise MutationValidationError("Metabase view must be full or layout.")
+        if view == "layout" and object_type != "dashboard":
+            raise MutationValidationError("Metabase view=layout requires object_type=dashboard.")
         if object_type == "collection":
             return self.collection_get(object_id)
         if type(object_id) is not int:
@@ -513,6 +570,8 @@ class MetabaseRuntime:
         if object_type == "question":
             return self.question_get_full(object_id)
         if object_type == "dashboard":
+            if view == "layout":
+                return self.dashboard_get_layout(object_id)
             return self.dashboard_get_full(object_id)
         if object_type == "database":
             return self.database_get(object_id)
@@ -3184,9 +3243,7 @@ class MetabaseRuntime:
                     if index in inconclusive_indexes
                     else "readback_only"
                 )
-            overall = (
-                Outcome.PARTIALLY_APPLIED if applied_indexes else Outcome.OUTCOME_UNKNOWN
-            )
+            overall = Outcome.PARTIALLY_APPLIED if applied_indexes else Outcome.OUTCOME_UNKNOWN
             return overall, {
                 "object_results": object_results,
                 "initial_object_results": initial_object_results,

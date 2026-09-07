@@ -8,8 +8,10 @@ import sys
 from typing import Any
 
 import pytest
+from fastmcp import Client
 
 import mcp_metabase.main as main_module
+import mcp_metabase.mcp_server as server_module
 from mcp_metabase.http_client import MetabaseApiError
 from mcp_metabase.mcp_server import legacy_mcp, mcp
 from mcp_metabase.models import Action, ObjectType, Outcome
@@ -351,16 +353,12 @@ def _prepare_three_item_batch(service: MetabaseRuntime) -> dict[str, Any]:
             {
                 "object_type": "dashboard",
                 "object_id": 10,
-                "operations": [
-                    {"op": "set", "path": "/description", "value": "Recovered"}
-                ],
+                "operations": [{"op": "set", "path": "/description", "value": "Recovered"}],
             },
             {
                 "object_type": "collection",
                 "object_id": 20,
-                "operations": [
-                    {"op": "set", "path": "/description", "value": "Remaining"}
-                ],
+                "operations": [{"op": "set", "path": "/description", "value": "Remaining"}],
             },
         ]
     )
@@ -1688,6 +1686,262 @@ def test_unknown_version_keeps_bounded_reads_and_disables_writes(runtime) -> Non
             1,
             [{"op": "set", "path": "/name", "value": "Blocked"}],
         )
+
+
+def test_dashboard_layout_preserves_inventory_and_full_state_without_nested_payload(
+    runtime,
+) -> None:
+    service, fake = runtime
+    fake.dashboards[10]["dashcards"] = [
+        {
+            "id": 301,
+            "card_id": 1,
+            "dashboard_tab_id": 101,
+            "col": 0,
+            "row": 0,
+            "size_x": 12,
+            "size_y": 8,
+            "card": fake.cards[1],
+            "parameter_mappings": [{"private": "mapping"}],
+        },
+        {
+            "id": 302,
+            "card_id": 1,
+            "dashboard_tab_id": 102,
+            "col": 12,
+            "row": 3,
+            "size_x": 6,
+            "size_y": 4,
+            "card": fake.cards[1],
+        },
+        {
+            "id": 303,
+            "card_id": None,
+            "dashboard_tab_id": None,
+            "col": 0,
+            "row": 12,
+            "size_x": 24,
+            "size_y": 2,
+            "card": None,
+            "visualization_settings": {"virtual_card": {"display": "text"}, "text": "Notes"},
+        },
+        {"id": 304, "col": 0, "row": 14, "size_x": 24, "size_y": 2},
+    ]
+    fake.dashboards[10]["tabs"].append({"id": 102, "name": "Extra", "position": 1})
+    before = copy.deepcopy(fake.dashboards[10])
+    full = service.object_get("dashboard", 10)
+    calls = []
+    original_get = fake.get_json
+
+    def capture_get(path, **kwargs):
+        calls.append(path)
+        return original_get(path, **kwargs)
+
+    fake.get_json = capture_get
+    result = service.object_get("dashboard", 10, view="layout", limit=1)
+    assert calls == ["/api/dashboard/10"]
+    assert {key: result[key] for key in full if key != "object"} == {
+        key: full[key] for key in full if key != "object"
+    }
+    assert result["projection"] == "layout"
+    assert "object" not in result
+    assert result["layout"] == {
+        "name": "Sales",
+        "width": "fixed",
+        "tabs": before["tabs"],
+        "dashcards": [
+            {
+                "id": 301,
+                "card_id": 1,
+                "dashboard_tab_id": 101,
+                "col": 0,
+                "row": 0,
+                "size_x": 12,
+                "size_y": 8,
+                "name": "Revenue",
+            },
+            {
+                "id": 302,
+                "card_id": 1,
+                "dashboard_tab_id": 102,
+                "col": 12,
+                "row": 3,
+                "size_x": 6,
+                "size_y": 4,
+                "name": "Revenue",
+            },
+            {
+                "id": 303,
+                "card_id": None,
+                "dashboard_tab_id": None,
+                "col": 0,
+                "row": 12,
+                "size_x": 24,
+                "size_y": 2,
+                "name": None,
+            },
+            {
+                "id": 304,
+                "card_id": None,
+                "dashboard_tab_id": None,
+                "col": 0,
+                "row": 14,
+                "size_x": 24,
+                "size_y": 2,
+                "name": None,
+            },
+        ],
+    }
+    assert fake.dashboards[10] == before
+    assert fake.put_calls == fake.post_calls == 0
+    fake.dashboards[10]["width"] = "full"
+    changed = service.object_get("dashboard", 10, view="layout")
+    assert changed["layout"]["width"] == "full"
+    assert changed["state_sha256"] != result["state_sha256"]
+
+
+@pytest.mark.parametrize("tabs", [[], None])
+def test_dashboard_layout_empty_and_null_tabs_are_not_fabricated(runtime, tabs) -> None:
+    service, fake = runtime
+    fake.dashboards[10]["tabs"] = tabs
+    result = service.object_get("dashboard", 10, view="layout")
+    assert result["layout"]["tabs"] == tabs
+    assert result["layout"]["dashcards"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tabs", {}),
+        ("tabs", [None]),
+        ("dashcards", None),
+        ("dashcards", {}),
+        ("dashcards", [None]),
+        ("dashcards", [{"id": 1}]),
+        ("dashcards", [{"id": True, "col": 0, "row": 0, "size_x": 1, "size_y": 1}]),
+        ("dashcards", [{"id": 1, "col": 0, "row": 0, "size_x": 1, "size_y": 1, "card": []}]),
+    ],
+)
+def test_dashboard_layout_rejects_malformed_inventory(runtime, field, value) -> None:
+    service, fake = runtime
+    fake.dashboards[10][field] = value
+    with pytest.raises(MutationValidationError, match="invalid shape"):
+        service.object_get("dashboard", 10, view="layout")
+
+
+@pytest.mark.parametrize("missing", ["tabs", "dashcards"])
+def test_dashboard_layout_missing_inventory_is_not_empty(runtime, missing) -> None:
+    service, fake = runtime
+    del fake.dashboards[10][missing]
+    with pytest.raises(MutationValidationError, match="invalid shape"):
+        service.object_get("dashboard", 10, view="layout")
+
+
+@pytest.mark.parametrize(
+    ("object_type", "view"),
+    [
+        ("question", "layout"),
+        ("collection", "layout"),
+        ("table", "layout"),
+        ("database", "layout"),
+        ("field", "layout"),
+        ("field_values", "layout"),
+        ("dashboard", "unknown"),
+        ("dashboard", None),
+    ],
+)
+def test_invalid_object_view_is_rejected_before_network(runtime, object_type, view) -> None:
+    service, fake = runtime
+
+    def unexpected_get(*args, **kwargs):
+        pytest.fail("Invalid view must not reach the API")
+
+    fake.get_json = unexpected_get
+    with pytest.raises(MutationValidationError, match="view"):
+        service.object_get(object_type, 10, view=view)
+
+
+@pytest.mark.parametrize(
+    ("object_type", "object_id", "key"),
+    [
+        ("question", 1, "object"),
+        ("dashboard", 10, "object"),
+        ("collection", "root", "collection"),
+        ("database", 50, "database"),
+        ("table", 60, "table"),
+        ("field", 40, "field"),
+        ("field_values", 40, "values"),
+    ],
+)
+def test_object_get_default_envelopes_remain_compatible(
+    runtime, object_type, object_id, key
+) -> None:
+    service, fake = runtime
+    original_get = fake.get_json
+
+    def metadata_get(path, **kwargs):
+        if path == "/api/table/60/query_metadata":
+            return {"id": 60, "fields": [{"id": 40}]}
+        if path == "/api/field/40/values":
+            return {"values": [["city"]], "has_more_values": False}
+        return original_get(path, **kwargs)
+
+    fake.get_json = metadata_get
+    default = service.object_get(object_type, object_id, limit=1)
+    assert default == service.object_get(object_type, object_id, view="full", limit=1)
+    assert key in default and "projection" not in default and "layout" not in default
+    assert default["origin"] == service.config.origin
+    if object_type == "dashboard":
+        assert default == service.dashboard_get_full(object_id)
+    if object_type == "table":
+        assert default["table"]["fields"] == [{"id": 40}]
+    if object_type == "field_values":
+        assert default["truncated"] is False
+
+
+def test_dashboard_layout_propagates_upstream_failure(runtime) -> None:
+    service, fake = runtime
+
+    def unavailable(*args, **kwargs):
+        raise MetabaseApiError("Unavailable", status_code=503)
+
+    fake.get_json = unavailable
+    with pytest.raises(MetabaseApiError, match="Unavailable"):
+        service.object_get("dashboard", 10, view="layout")
+
+
+def test_object_get_view_protocol_and_discovery(runtime, monkeypatch) -> None:
+    service, _ = runtime
+    monkeypatch.setattr(server_module, "_RUNTIME", service)
+
+    async def run() -> None:
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+            tool = next(tool for tool in tools if tool.name == "metabase_object_get")
+            assert len(tools) == 14
+            assert tool.inputSchema["properties"]["view"] == {
+                "default": "full",
+                "enum": ["full", "layout"],
+                "type": "string",
+            }
+            assert "table.fields" in tool.description
+            assert "state_sha256" in tool.description
+            result = await client.call_tool(
+                "metabase_object_get",
+                {"object_type": "dashboard", "object_id": 10, "view": "layout"},
+            )
+            assert result.data["layout"]["dashcards"] == []
+            assert result.data["projection"] == "layout"
+            for arguments in (
+                {"object_type": "dashboard", "object_id": 10, "view": "other"},
+                {"object_type": "question", "object_id": 1, "view": "layout"},
+            ):
+                error = await client.call_tool(
+                    "metabase_object_get", arguments, raise_on_error=False
+                )
+                assert error.is_error is True
+
+    asyncio.run(run())
 
 
 def test_multi_model_reads_forward_lists_and_reject_invalid_pages_before_network(

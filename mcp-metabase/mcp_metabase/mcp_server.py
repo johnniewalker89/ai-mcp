@@ -601,14 +601,27 @@ def metabase_object_get(
     object_id: int | str,
     include_fields: bool = True,
     limit: int = 100,
+    view: Literal["full", "layout"] = "full",
 ) -> dict[str, Any]:
-    """Read one complete typed object; no generic REST path is accepted."""
+    """Read one typed object. Response keys by object_type (all include origin):
+
+    full: question/dashboard -> object, object_type, object_id, state_sha256;
+    collection/database/table/field -> the matching named key (table.fields,
+    NOT object.fields). field_values -> top-level values and truncated.
+    include_fields affects only table; limit affects only field_values.
+    layout: dashboard only -> projection='layout', layout {name, width, tabs,
+    dashcards {id, card_id, dashboard_tab_id, col, row, size_x, size_y, name}},
+    plus object_type/object_id/state_sha256 of the full state. All positions
+    are retained, including cards without a question. This is not a full write
+    body; use full for queries, settings or mappings. No generic REST path.
+    """
     return _call(
         "object_get",
         object_type,
         object_id,
         include_fields=include_fields,
         limit=limit,
+        view=view,
     )
 
 

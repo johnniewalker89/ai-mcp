@@ -99,7 +99,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | --- | --- |
 | `metabase_health` | Проверяет подключение, пользователя, версию, режим работы и лимиты |
 | `metabase_search` | Ищет объекты Metabase с ограничением количества результатов |
-| `metabase_object_get` | Читает карточку, дашборд, коллекцию, базу, таблицу или поле |
+| `metabase_object_get` | Читает объект целиком или только раскладку дашборда (`view="layout"`) |
 | `metabase_collection_items` | Показывает элементы и дочерние коллекции выбранной коллекции |
 | `metabase_session_open` | Открывает подтверждаемую рабочую сессию для объекта |
 | `metabase_session_apply` | Применяет изменения внутри открытой сессии |
@@ -111,6 +111,49 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | `metabase_rollback_prepare` | Готовит откат ранее выполненного изменения |
 | `metabase_rollback_execute` | После подтверждения выполняет подготовленный откат |
 | `metabase_exact_action_revoke` | Отменяет неиспользованный подготовленный план |
+
+### Ответы `metabase_object_get`
+
+`view="full"` — значение по умолчанию; прежние ответы сохраняются.
+У каждого ответа есть `origin`. Полезная нагрузка зависит от `object_type`:
+
+| `object_type` | Где данные в structured result |
+| --- | --- |
+| `question`, `dashboard` | `object` — полный объект; рядом `object_type`, `object_id`, `state_sha256` |
+| `collection`, `database`, `table`, `field` | Одноимённый ключ: `collection`, `database`, `table`, `field` |
+| `field_values` | `values` и `truncated` на верхнем уровне; остальные metadata upstream сохранены |
+
+Например, поля таблицы находятся в `structuredContent.table.fields`, а не
+`structuredContent.object.fields`. `include_fields` применяется только к таблице;
+`limit` ограничивает только `field_values`, не количество полей таблицы или
+позиций дашборда. `object_id` — положительное целое; для коллекции также
+разрешены поддерживаемые ссылки `root` и `trash`.
+
+Для просмотра раскладки вызови:
+
+```json
+{"object_type": "dashboard", "object_id": 123, "view": "layout"}
+```
+
+Ответ содержит `origin`, `object_type`, `object_id`, `state_sha256` полного
+состояния, `projection="layout"` и объект `layout`:
+
+- `name`, `width` — значения дашборда, `null` при отсутствии;
+- `tabs` — исходный список вкладок (включая дополнительные поля) либо исходный `null`;
+- `dashcards` — все позиции в исходном порядке, без удаления повторных ссылок:
+  `id`, `card_id`, `dashboard_tab_id`, `col`, `row`, `size_x`, `size_y`, `name`.
+  Геометрия и `id` — целые; ссылки и имя могут быть `null`. Имя берётся из
+  вложенной карточки; текстовые/виртуальные позиции без карточки сохраняются.
+
+Пустой `dashcards=[]` возвращается как пустой список. Повреждённый inventory
+вызывает ошибку вместо неполной раскладки. Режим применим только к дашборду;
+неизвестный `view` и несовместимый `object_type` отклоняются до обращения к API.
+
+Проекция не содержит SQL, вложенных полных карточек, visualization settings
+или mappings и не является полным телом для записи. Для их изучения нужен
+`view="full"`. Сервер по-прежнему делает один GET полного дашборда: проекция
+уменьшает MCP-ответ, а не upstream HTTP payload. Общего cache нет; повторное
+чтение получает актуальный объект, а проверки записей работают как прежде.
 
 ### Основные действия
 
