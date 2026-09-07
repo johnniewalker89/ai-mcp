@@ -9,20 +9,28 @@ MCP-сервер для работы с Metabase через API key без бр�
 
 ## Установка из Git
 
-1. Найди абсолютный путь к `uvx`: `(Get-Command uvx).Source` в PowerShell или
-   `command -v uvx` в macOS/Linux.
-2. Выбери точный commit SHA из репозитория.
-3. Добавь сервер в MCP-конфиг.
-4. Перезапусти MCP-клиент.
+Нужны Git и `uv` 0.11.7. Выбери полный 40-символьный `<COMMIT_SHA>` и новый
+`<SOURCE_DIR>` для этой версии. Один раз подготовь runtime по `uv.lock`:
+
+```text
+git clone --no-checkout https://github.com/johnniewalker89/ai-mcp.git "<SOURCE_DIR>"
+git -C "<SOURCE_DIR>" checkout --detach <COMMIT_SHA>
+<ABSOLUTE_PATH_TO_UV> sync --project "<SOURCE_DIR>/mcp-metabase" --locked --no-default-groups --no-editable --link-mode copy --python 3.12.10
+```
+
+Готовый executable: `<SOURCE_DIR>/mcp-metabase/.venv/Scripts/mcp-metabase.exe`
+на Windows или `<SOURCE_DIR>/mcp-metabase/.venv/bin/mcp-metabase` на macOS/Linux.
+Подставь его абсолютный путь как `<READY_ENTRYPOINT>` ниже. Повторная команда
+`uv sync --locked` проверяет тот же lock; запуск MCP использует готовый runtime.
+Обновление готовь в новом каталоге и переключай command после проверки;
+предыдущий executable сохраняй для отката.
+
+Основной способ настройки — параметры и token/password в локальном env-блоке
+MCP-клиента. Конфиг с заполненными секретами не публикуй. Затем перезапусти клиент.
 
 ```toml
 [mcp_servers.metabase_work]
-command = "<ABSOLUTE_PATH_TO_UVX>"
-args = [
-  "--from",
-  "git+https://github.com/johnniewalker89/ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase",
-  "mcp-metabase"
-]
+command = "<READY_ENTRYPOINT>"
 startup_timeout_sec = 120
 tool_timeout_sec = 120
 default_tools_approval_mode = "prompt"
@@ -39,7 +47,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 Пакет не загружает dotenv автоматически; [`metabase.env.example`](metabase.env.example)
 служит справочником по доступным переменным.
 
-Один и тот же конфиг работает в Windows, macOS и Linux; меняется только путь к `uvx`.
+Один и тот же конфиг работает в Windows, macOS и Linux; меняется путь к готовому executable.
 
 ## Настройка
 
@@ -98,7 +106,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | Инструмент | Что делает |
 | --- | --- |
 | `metabase_health` | Проверяет подключение, пользователя, версию, режим работы и лимиты |
-| `metabase_search` | Ищет объекты Metabase с ограничением количества результатов |
+| `metabase_search` | Ищет объекты с pagination; `include_ranking_details=false` исключает только `scores` |
 | `metabase_object_get` | Читает объект целиком или только раскладку дашборда (`view="layout"`) |
 | `metabase_collection_items` | Показывает элементы и дочерние коллекции выбранной коллекции |
 | `metabase_session_open` | Открывает подтверждаемую рабочую сессию для объекта |
@@ -111,6 +119,14 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | `metabase_rollback_prepare` | Готовит откат ранее выполненного изменения |
 | `metabase_rollback_execute` | После подтверждения выполняет подготовленный откат |
 | `metabase_exact_action_revoke` | Отменяет неиспользованный подготовленный план |
+
+### Ответы `metabase_search`
+
+По умолчанию `include_ranking_details=true` сохраняет прежний ответ. Для обычного
+поиска передай `false`: из каждого элемента `items` будет удалено только поле
+`scores`. Состав, порядок, остальные поля объектов и metadata pagination сохраняются.
+Это уменьшает объём MCP-ответа; запрос к Metabase и его сетевой ответ не меняются.
+Уменьшение bytes не является измерением расхода подписки.
 
 ### Ответы `metabase_object_get`
 
@@ -180,7 +196,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 Проверь установленный Git commit и подключение к Metabase:
 
 ```text
-<ABSOLUTE_PATH_TO_UVX> --from "git+https://github.com/johnniewalker89/ai-mcp.git@<COMMIT_SHA>#subdirectory=mcp-metabase" mcp-metabase --check
+<READY_ENTRYPOINT> --check
 ```
 
 После перезапуска клиента вызови `metabase_health`. При рабочей конфигурации он вернёт

@@ -97,8 +97,14 @@ def compact_metabase_search(
     archived: bool = False,
     limit: int = 20,
     offset: int = 0,
+    include_ranking_details: bool = True,
 ) -> dict[str, Any]:
-    """Search a bounded allowlist of Metabase entity types."""
+    """Search bounded Metabase entity types; results are in items with pagination metadata.
+
+    Set include_ranking_details=false to omit only scores (ranking diagnostics),
+    preserving all other fields and row order. Default true returns full results.
+    This reduces MCP output, not upstream search load; bound limit and output too.
+    """
     return _call(
         "search",
         query,
@@ -106,6 +112,7 @@ def compact_metabase_search(
         archived=archived,
         limit=limit,
         offset=offset,
+        include_ranking_details=include_ranking_details,
     )
 
 
@@ -575,8 +582,9 @@ def metabase_search(
     archived: bool = False,
     limit: int = 20,
     offset: int = 0,
+    include_ranking_details: bool = True,
 ) -> dict[str, Any]:
-    """Search a bounded allowlist of Metabase entity types."""
+    """Search bounded entities; include_ranking_details=false omits only item scores."""
     return _call(
         "search",
         query,
@@ -584,6 +592,7 @@ def metabase_search(
         archived=archived,
         limit=limit,
         offset=offset,
+        include_ranking_details=include_ranking_details,
     )
 
 

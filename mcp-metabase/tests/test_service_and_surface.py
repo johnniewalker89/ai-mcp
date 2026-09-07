@@ -1978,6 +1978,88 @@ def test_multi_model_reads_forward_lists_and_reject_invalid_pages_before_network
     assert len(calls) == completed_calls
 
 
+@pytest.mark.parametrize(
+    "items,total,offset,limit",
+    [
+        ([], 0, 0, 20),
+        (
+            [
+                {
+                    "id": 1,
+                    "model": "card",
+                    "scores": {"score": 3},
+                    "description": "Keep",
+                    "extra": {"x": None},
+                },
+                {"id": 2, "model": "table", "collection": {"id": 9}, "database_id": 7},
+            ],
+            9,
+            2,
+            2,
+        ),
+        ([{"id": 1, "scores": None}, {"id": 1, "scores": []}], 2, 0, 1),
+    ],
+)
+def test_search_optional_ranking_preserves_order_fields_pagination_and_upstream(
+    runtime, items, total, offset, limit
+):
+    service, _ = runtime
+    captured = {"data": copy.deepcopy(items), "total": total}
+    calls = []
+
+    def get(path, *, params):
+        calls.append((path, copy.deepcopy(params)))
+        return captured
+
+    service.http.get_json = get
+    default = service.search("same", limit=limit, offset=offset)
+    compact = service.search("same", limit=limit, offset=offset, include_ranking_details=False)
+    assert {k: v for k, v in compact.items() if k != "items"} == {
+        k: v for k, v in default.items() if k != "items"
+    }
+    assert compact["items"] == [
+        {k: v for k, v in item.items() if k != "scores"} for item in items[:limit]
+    ]
+    assert default["items"] == items[:limit]
+    assert captured["data"] == items
+    assert calls[0] == calls[1]
+
+
+@pytest.mark.parametrize("value", [None, 0, "false", {}])
+def test_search_ranking_flag_rejects_non_boolean_before_http(runtime, value):
+    service, _ = runtime
+    service.http.get_json = lambda *args, **kwargs: pytest.fail("unexpected HTTP")
+    with pytest.raises(MutationValidationError, match="boolean"):
+        service.search(include_ranking_details=value)
+
+
+def test_search_ranking_protocol_default_and_compact(runtime, monkeypatch):
+    service, _ = runtime
+    monkeypatch.setattr(server_module, "_RUNTIME", service)
+    service.http.get_json = lambda *args, **kwargs: {
+        "data": [{"id": 1, "scores": [42], "name": "Keep"}],
+        "total": 1,
+    }
+
+    async def run():
+        for server in (mcp, legacy_mcp):
+            async with Client(server) as client:
+                tools = await client.list_tools()
+                tool = next(t for t in tools if t.name == "metabase_search")
+                assert tool.inputSchema["properties"]["include_ranking_details"] == {
+                    "default": True,
+                    "type": "boolean",
+                }
+                full = await client.call_tool("metabase_search", {})
+                compact = await client.call_tool(
+                    "metabase_search", {"include_ranking_details": False}
+                )
+                assert full.data["items"][0]["scores"] == [42]
+                assert compact.data["items"] == [{"id": 1, "name": "Keep"}]
+
+    asyncio.run(run())
+
+
 def test_compact_action_prepare_explains_create_argument_wrapper(runtime) -> None:
     service, fake = runtime
 

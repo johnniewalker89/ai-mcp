@@ -408,7 +408,10 @@ class MetabaseRuntime:
         archived: bool = False,
         limit: int = 20,
         offset: int = 0,
+        include_ranking_details: bool = True,
     ) -> dict[str, Any]:
+        if type(include_ranking_details) is not bool:
+            raise MutationValidationError("include_ranking_details must be a boolean.")
         if not isinstance(query, str) or len(query) > 500:
             raise MutationValidationError("Metabase search query is invalid or too long.")
         self._validate_page(limit=limit, offset=offset)
@@ -424,7 +427,13 @@ class MetabaseRuntime:
         if selected_models:
             params["models"] = selected_models
         payload = self.http.get_json("/api/search", params=params)
-        return self._bounded_envelope(payload, limit=limit, offset=offset)
+        result = self._bounded_envelope(payload, limit=limit, offset=offset)
+        if not include_ranking_details:
+            result["items"] = [
+                {key: value for key, value in item.items() if key != "scores"}
+                for item in result["items"]
+            ]
+        return result
 
     def _collection_path(self, collection_id: int | str, *, items: bool = False) -> str:
         segment = quote(self._collection_ref(collection_id), safe="")
