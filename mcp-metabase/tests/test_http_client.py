@@ -86,3 +86,42 @@ def test_list_query_parameters_are_encoded_as_repeated_keys(configured) -> None:
     )
 
     assert result == {"data": [], "total": 0}
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("failure", ["size", "encoding", "stream", "json"])
+def test_response_failures_preserve_mutation_uncertainty(configured, method, failure):
+    calls = []
+    closed = []
+
+    class Stream(httpx.SyncByteStream):
+        def __iter__(self):
+            if failure == "stream":
+                raise httpx.ReadError("private-response")
+            yield b"x" * (configured.max_json_bytes + 1) if failure == "size" else b"not-json"
+
+        def close(self):
+            closed.append(True)
+
+    def handler(request):
+        calls.append(request.method)
+        return httpx.Response(
+            200,
+            stream=Stream(),
+            request=request,
+            headers={"content-encoding": "gzip"} if failure == "encoding" else {},
+        )
+
+    client = MetabaseHttpClient(configured, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(MetabaseApiError) as caught:
+            if method == "GET":
+                client.get_json("/api/card/1")
+            else:
+                client.post_json("/api/card", {"name": "fixture"})
+        assert caught.value.outcome_unknown is (method == "POST")
+        assert "private-response" not in str(caught.value)
+        assert calls == [method]
+        assert closed
+    finally:
+        client.close()

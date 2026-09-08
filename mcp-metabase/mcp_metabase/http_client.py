@@ -196,11 +196,17 @@ class MetabaseHttpClient:
         try:
             if not 200 <= response.status_code < 300:
                 raise self._response_error(response, mutation=mutation)
-            self._ensure_identity_encoding(response)
-            payload = self._read_bounded(
-                response,
-                limit=byte_limit or self.config.max_json_bytes,
-            )
+            try:
+                self._ensure_identity_encoding(response)
+                payload = self._read_bounded(
+                    response,
+                    limit=byte_limit or self.config.max_json_bytes,
+                )
+            except MetabaseApiError as error:
+                # The service already accepted the request. A failed response
+                # read cannot prove that a mutation had no effect.
+                error.outcome_unknown = mutation
+                raise
         finally:
             response.close()
         if not payload:
