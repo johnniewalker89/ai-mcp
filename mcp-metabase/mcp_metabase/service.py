@@ -36,6 +36,7 @@ from mcp_metabase.normalization import (
     canonicalize_dashboard_parameter_mappings,
     dataset_query_semantically_matches,
     mutation_summary,
+    object_state_sha256,
     project_state,
     rollback_mutation,
     validate_edit_session_operations,
@@ -493,7 +494,7 @@ class MetabaseRuntime:
             "origin": self.config.origin,
             "object_type": object_type.value,
             "object_id": state["id"],
-            "state_sha256": canonical_sha256(state),
+            "state_sha256": object_state_sha256(state, object_type),
             "object": raw,
         }
 
@@ -677,7 +678,7 @@ class MetabaseRuntime:
             raise MutationValidationError(
                 "Metabase edit-session readback returned a different object id."
             )
-        state_sha256 = canonical_sha256(state)
+        state_sha256 = object_state_sha256(state, selected_type)
         session = self.edit_sessions.open(
             instance=self.config.instance,
             origin=self.config.origin,
@@ -787,7 +788,7 @@ class MetabaseRuntime:
         try:
             raw = self._object_raw(session.object_type, session.object_id)
             current_state = project_state(raw, session.object_type)
-            current_sha256 = canonical_sha256(current_state)
+            current_sha256 = object_state_sha256(current_state, session.object_type)
         except MetabaseApiError:
             self.edit_sessions.release_apply(session_id)
             raise
@@ -1086,7 +1087,7 @@ class MetabaseRuntime:
         object_type: ObjectType,
     ) -> str:
         if object_type is ObjectType.QUESTION:
-            return canonical_sha256(cls._full_session_question_binding_state(state))
+            return object_state_sha256(cls._full_session_question_binding_state(state), object_type)
         if object_type is not ObjectType.DASHBOARD:
             return canonical_sha256(state)
 
@@ -1100,7 +1101,7 @@ class MetabaseRuntime:
                 # stable question state used by the linked-question CAS instead.
                 question_state = project_state(embedded_card, ObjectType.QUESTION)
                 dashcard["card"] = cls._full_session_question_binding_state(question_state)
-        return canonical_sha256(binding_state)
+        return object_state_sha256(binding_state, object_type)
 
     def _full_session_graph(
         self,
@@ -2129,7 +2130,7 @@ class MetabaseRuntime:
                 "name": request.name,
                 "create_kind": "question_clone",
                 "source_id": source_state["id"],
-                "source_sha256": canonical_sha256(source_state),
+                "source_sha256": object_state_sha256(source_state, ObjectType.QUESTION),
             }
         )
         mutation = PlannedMutation(
@@ -2139,7 +2140,7 @@ class MetabaseRuntime:
             after_state=copy.deepcopy(payload),
             write_payload=payload,
             changed_roots=tuple(payload),
-            before_sha256=canonical_sha256(source_state),
+            before_sha256=object_state_sha256(source_state, ObjectType.QUESTION),
             after_sha256=canonical_sha256(payload),
             target=target,
         )
@@ -2186,7 +2187,7 @@ class MetabaseRuntime:
                 question_bindings.append(
                     {
                         "question_id": card_id,
-                        "state_sha256": canonical_sha256(question_state),
+                        "state_sha256": object_state_sha256(question_state, ObjectType.QUESTION),
                     }
                 )
             dashcard["card"] = copy.deepcopy(questions[card_id])
@@ -2271,7 +2272,7 @@ class MetabaseRuntime:
                 "name": chosen_name,
                 "create_kind": "dashboard_clone",
                 "source_id": source_state["id"],
-                "source_sha256": canonical_sha256(source_state),
+                "source_sha256": object_state_sha256(source_state, ObjectType.DASHBOARD),
                 "expected_dashcard_count": len(source_state.get("dashcards", [])),
                 "expected_tab_count": len(source_state.get("tabs", [])),
                 "is_deep_copy": bool(is_deep_copy),
@@ -2284,7 +2285,7 @@ class MetabaseRuntime:
             after_state=copy.deepcopy(payload),
             write_payload=payload,
             changed_roots=tuple(payload),
-            before_sha256=canonical_sha256(source_state),
+            before_sha256=object_state_sha256(source_state, ObjectType.DASHBOARD),
             after_sha256=canonical_sha256(payload),
             target=target,
         )
@@ -3087,7 +3088,7 @@ class MetabaseRuntime:
             return False, None
         current_raw = self._object_raw(mutation.object_type, mutation.object_id)
         current = project_state(current_raw, mutation.object_type)
-        if canonical_sha256(current) != mutation.before_sha256:
+        if object_state_sha256(current, mutation.object_type) != mutation.before_sha256:
             return False, current_raw
         expected_inventory = mutation.target.get("inventory")
         if expected_inventory is not None:
@@ -3145,7 +3146,7 @@ class MetabaseRuntime:
                     "reconciliation_attempts": attempt,
                 }
             else:
-                readback_sha256 = canonical_sha256(readback_state)
+                readback_sha256 = object_state_sha256(readback_state, mutation.object_type)
                 if verify_mutation(mutation, readback):
                     mutation.verified_after_state = readback_state
                     mutation.verified_after_sha256 = readback_sha256
@@ -3461,7 +3462,9 @@ class MetabaseRuntime:
                 raise MetabasePolicyError("Metabase dashboard question binding id is invalid.")
             question = self._object_raw(ObjectType.QUESTION, question_id)
             question_state = project_state(question, ObjectType.QUESTION)
-            if canonical_sha256(question_state) != binding.get("state_sha256"):
+            if object_state_sha256(question_state, ObjectType.QUESTION) != binding.get(
+                "state_sha256"
+            ):
                 return False
         source_id = mutation.target.get("source_id")
         if source_id is None:
@@ -3470,7 +3473,9 @@ class MetabaseRuntime:
             raise MetabasePolicyError("Metabase clone source binding is invalid.")
         source = self._object_raw(mutation.object_type, source_id)
         source_state = project_state(source, mutation.object_type)
-        return canonical_sha256(source_state) == mutation.target.get("source_sha256")
+        return object_state_sha256(source_state, mutation.object_type) == mutation.target.get(
+            "source_sha256"
+        )
 
     @classmethod
     def _requested_subset_matches(cls, expected: Any, actual: Any) -> bool:
@@ -3523,7 +3528,9 @@ class MetabaseRuntime:
     ) -> tuple[dict[str, Any] | None, str | None]:
         try:
             raw = self._object_raw(mutation.object_type, created_id)
-            return raw, canonical_sha256(project_state(raw, mutation.object_type))
+            return raw, object_state_sha256(
+                project_state(raw, mutation.object_type), mutation.object_type
+            )
         except (MetabaseApiError, MutationValidationError):
             return None, None
 

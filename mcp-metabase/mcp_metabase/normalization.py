@@ -192,6 +192,62 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _native_field_filter_comparison(value: Any) -> Any:
+    """Ignore only read-generated UUIDs on native template-tag field references."""
+    result = copy.deepcopy(value)
+    if not isinstance(result, dict):
+        return result
+    if result.get("lib/type") == "mbql/query":
+        stages = result.get("stages")
+        containers = (
+            [
+                stage
+                for stage in stages
+                if isinstance(stage, dict) and stage.get("lib/type") == "mbql.stage/native"
+            ]
+            if isinstance(stages, list)
+            else []
+        )
+    elif result.get("type") == "native" and isinstance(result.get("native"), dict):
+        containers = [result["native"]]
+    else:
+        return result
+    for container in containers:
+        raw_tags = container.get("template-tags")
+        tags = list(raw_tags.values()) if isinstance(raw_tags, dict) else raw_tags
+        if not isinstance(tags, list):
+            continue
+        for tag in tags:
+            if not isinstance(tag, dict) or tag.get("type") != "dimension":
+                continue
+            dimension = tag.get("dimension")
+            if (
+                isinstance(dimension, list)
+                and len(dimension) == 3
+                and dimension[0] == "field"
+                and isinstance(dimension[1], dict)
+            ):
+                # v0.63 may assign a fresh field-clause UUID on every GET. The
+                # field id and all other options remain bound; payloads stay raw.
+                dimension[1].pop("lib/uuid", None)
+    return result
+
+
+def object_state_sha256(state: dict[str, Any], object_type: ObjectType) -> str:
+    """Hash object state without volatile native field-filter clause identities."""
+    comparison = copy.deepcopy(state)
+    if object_type is ObjectType.QUESTION and "dataset_query" in comparison:
+        comparison["dataset_query"] = _native_field_filter_comparison(comparison["dataset_query"])
+    elif object_type is ObjectType.DASHBOARD and isinstance(comparison.get("dashcards"), list):
+        for dashcard in comparison["dashcards"]:
+            if not isinstance(dashcard, dict):
+                continue
+            card = dashcard.get("card")
+            if isinstance(card, dict) and "dataset_query" in card:
+                card["dataset_query"] = _native_field_filter_comparison(card["dataset_query"])
+    return canonical_sha256(comparison)
+
+
 def _semantic_subset_matches(expected: Any, actual: Any) -> bool:
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
@@ -302,6 +358,8 @@ def _native_dataset_query_signature(value: Any) -> dict[str, Any] | None:
 def dataset_query_semantically_matches(expected: Any, actual: Any) -> bool:
     """Compare accepted legacy and MBQL v2 native queries by persisted semantics."""
 
+    expected = _native_field_filter_comparison(expected)
+    actual = _native_field_filter_comparison(actual)
     expected_signature = _native_dataset_query_signature(expected)
     actual_signature = _native_dataset_query_signature(actual)
     if expected_signature is None or actual_signature is None:
@@ -986,7 +1044,7 @@ def build_mutation(
         object_type,
         require_executable_mappings=require_executable_mappings,
     )
-    if canonical_sha256(before) == canonical_sha256(after):
+    if object_state_sha256(before, object_type) == object_state_sha256(after, object_type):
         raise MutationValidationError("Patch produces no state change.")
     payload = _build_write_payload(object_type, after, changed_roots)
     # Metabase's collection PUT schema defaults an omitted archived flag to false.
@@ -1000,8 +1058,8 @@ def build_mutation(
         after_state=after,
         write_payload=payload,
         changed_roots=changed_roots,
-        before_sha256=canonical_sha256(before),
-        after_sha256=canonical_sha256(after),
+        before_sha256=object_state_sha256(before, object_type),
+        after_sha256=object_state_sha256(after, object_type),
     )
 
 
@@ -1010,7 +1068,10 @@ def rollback_mutation(source: PlannedMutation, current_raw: dict[str, Any]) -> P
         raise MutationValidationError("Source mutation has no rollback snapshot.")
     proven_after = source.verified_after_state or source.after_state
     current = project_state(current_raw, source.object_type)
-    if canonical_sha256(current) != canonical_sha256(proven_after):
+    if object_state_sha256(current, source.object_type) != object_state_sha256(
+        proven_after,
+        source.object_type,
+    ):
         raise MutationValidationError("Current state no longer matches the proven applied state.")
     for root in source.changed_roots:
         if root not in source.before_state:
@@ -1031,8 +1092,8 @@ def rollback_mutation(source: PlannedMutation, current_raw: dict[str, Any]) -> P
         after_state=copy.deepcopy(source.before_state),
         write_payload=payload,
         changed_roots=source.changed_roots,
-        before_sha256=canonical_sha256(current),
-        after_sha256=canonical_sha256(source.before_state),
+        before_sha256=object_state_sha256(current, source.object_type),
+        after_sha256=object_state_sha256(source.before_state, source.object_type),
         target={},
     )
 

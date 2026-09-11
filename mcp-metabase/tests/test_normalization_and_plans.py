@@ -9,10 +9,81 @@ from mcp_metabase.normalization import (
     MutationValidationError,
     build_mutation,
     canonical_sha256,
+    object_state_sha256,
     project_state,
     verify_mutation,
 )
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
+
+
+@pytest.mark.parametrize("query_shape", ["mbql-native", "legacy-native"])
+def test_native_field_uuid_comparison_preserves_snapshots_and_payload(
+    native_field_filter_query,
+    query_shape,
+):
+    query = copy.deepcopy(native_field_filter_query)
+    if query_shape == "legacy-native":
+        stage = query["stages"][0]
+        query = {
+            "type": "native",
+            "database": 50,
+            "native": {
+                "query": stage["native"],
+                "template-tags": {"date": stage["template-tags"][0]},
+            },
+        }
+    before = _question()
+    before["dataset_query"] = query
+    original = copy.deepcopy(before)
+    operations = [PatchOperation(op="set", path="/dataset_query", value={**query, "database": 51})]
+    mutation = build_mutation(
+        object_type=ObjectType.QUESTION, raw_before=before, operations=operations
+    )
+    observed = copy.deepcopy(mutation.after_state)
+    if query_shape == "mbql-native":
+        tag = observed["dataset_query"]["stages"][0]["template-tags"][0]
+    else:
+        tag = observed["dataset_query"]["native"]["template-tags"]["date"]
+    tag["dimension"][1]["lib/uuid"] = "00000000-0000-4000-8000-000000000002"
+    assert mutation.after_sha256 == object_state_sha256(observed, ObjectType.QUESTION)
+    assert verify_mutation(mutation, observed)
+    assert mutation.write_payload["dataset_query"] == operations[0].value
+    assert before == original
+    assert mutation.before_state["dataset_query"] == query
+    assert mutation.after_state["dataset_query"] == operations[0].value
+    tag["dimension"][2] = 456
+    assert mutation.after_sha256 != object_state_sha256(observed, ObjectType.QUESTION)
+    assert not verify_mutation(mutation, observed)
+
+
+@pytest.mark.parametrize(
+    "location", ["tag-id", "default", "field-options", "stage", "gui-clause", "visualization"]
+)
+def test_object_hash_keeps_uuid_fields_outside_native_dimension_clause(
+    native_field_filter_query,
+    location,
+):
+    before = _question()
+    before["dataset_query"] = copy.deepcopy(native_field_filter_query)
+    stage = before["dataset_query"]["stages"][0]
+    tag = stage["template-tags"][0]
+    if location == "tag-id":
+        target, key = tag, "id"
+    elif location == "default":
+        target, key = tag.setdefault("default", {}), "lib/uuid"
+    elif location == "field-options":
+        target, key = tag["dimension"][1], "source-field"
+    elif location == "stage":
+        target, key = stage, "lib/uuid"
+    elif location == "gui-clause":
+        stage["lib/type"] = "mbql.stage/mbql"
+        target, key = tag["dimension"][1], "lib/uuid"
+    else:
+        target, key = before["visualization_settings"], "lib/uuid"
+    target[key] = "original"
+    digest = object_state_sha256(before, ObjectType.QUESTION)
+    target[key] = "changed"
+    assert digest != object_state_sha256(before, ObjectType.QUESTION)
 
 
 def _question() -> dict:

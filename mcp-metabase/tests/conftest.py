@@ -8,6 +8,33 @@ from mcp_metabase.config import MetabaseConfig
 
 
 @pytest.fixture
+def native_field_filter_query() -> dict:
+    return {
+        "lib/type": "mbql/query",
+        "database": 50,
+        "stages": [
+            {
+                "lib/type": "mbql.stage/native",
+                "native": "select 1 where {{date}}",
+                "template-tags": [
+                    {
+                        "id": "persisted-tag-id",
+                        "name": "date",
+                        "type": "dimension",
+                        "widget-type": "date/all-options",
+                        "dimension": [
+                            "field",
+                            {"lib/uuid": "00000000-0000-4000-8000-000000000001"},
+                            123,
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.fixture
 def configured(tmp_path: Path) -> MetabaseConfig:
     return MetabaseConfig(
         instance="test_metabase",

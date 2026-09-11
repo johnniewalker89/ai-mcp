@@ -247,6 +247,169 @@ def _execute(runtime: MetabaseRuntime, plan: dict[str, Any], action: Action) -> 
     )
 
 
+@pytest.fixture
+def volatile_native_card(runtime, native_field_filter_query):
+    service, fake = runtime
+    fake.cards[1]["dataset_query"] = copy.deepcopy(native_field_filter_query)
+    fake.dashboards[10]["dashcards"] = [
+        {
+            "id": 201,
+            "card_id": 1,
+            "row": 0,
+            "col": 0,
+            "size_x": 6,
+            "size_y": 4,
+            "dashboard_tab_id": 101,
+            "parameter_mappings": [],
+            "visualization_settings": {},
+        }
+    ]
+    original_get = fake.get_json
+    reads = 0
+
+    def get_with_generated_field_uuid(path, *, params=None):  # noqa: ANN001, ANN202
+        nonlocal reads
+        payload = original_get(path, params=params)
+        cards = []
+        if path == "/api/card/1":
+            cards.append(payload)
+        elif path == "/api/dashboard/10":
+            for dashcard in payload["dashcards"]:
+                dashcard["card"] = copy.deepcopy(fake.cards[dashcard["card_id"]])
+                cards.append(dashcard["card"])
+        for card in cards:
+            reads += 1
+            tag = card["dataset_query"]["stages"][0]["template-tags"][0]
+            tag["dimension"][1]["lib/uuid"] = f"00000000-0000-4000-8000-{reads:012d}"
+        return payload
+
+    fake.get_json = get_with_generated_field_uuid
+    return service, fake
+
+
+@pytest.mark.parametrize(("object_type", "object_id"), [("question", 1), ("dashboard", 10)])
+def test_session_survives_generated_native_field_uuid(volatile_native_card, object_type, object_id):
+    service, fake = volatile_native_card
+    before_query = copy.deepcopy(fake.cards[1]["dataset_query"])
+    opened = service.object_session_open(object_type, object_id)
+    session_id = opened["session"]["session_id"]
+
+    first = service.object_session_query(session_id, 1, row_limit=5)
+    assert first["outcome"] == "query_completed"
+    applied = service.object_session_apply(
+        session_id,
+        [
+            {
+                "object_type": object_type,
+                "object_id": object_id,
+                "operations": [{"op": "set", "path": "/description", "value": "Stable binding"}],
+            }
+        ],
+    )
+    assert applied["outcome"] == Outcome.APPLIED_VERIFIED.value
+    second = service.object_session_query(session_id, 1, row_limit=5)
+    assert second["outcome"] == "query_completed"
+    assert second["session"]["active"] is True
+    assert fake.cards[1]["dataset_query"] == before_query
+    assert fake.put_calls == 1
+
+
+def test_exact_update_and_rollback_survive_generated_native_field_uuid(volatile_native_card):
+    service, fake = volatile_native_card
+    plan = service.question_update_prepare(
+        1,
+        [{"op": "set", "path": "/description", "value": "Stable binding"}],
+    )
+    result = _execute(service, plan, Action.QUESTION_UPDATE)
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+    rollback = service.rollback_prepare(plan["plan_id"])
+    reverted = _execute(service, rollback, Action.QUESTION_ROLLBACK)
+    assert reverted["outcome"] == Outcome.APPLIED_VERIFIED.value
+    assert fake.cards[1]["description"] == "Stable"
+
+
+@pytest.mark.parametrize(
+    ("action", "arguments", "expected_action"),
+    [
+        ("question_copy", {"source_question_id": 1, "name": "Copy"}, Action.QUESTION_CLONE),
+        ("dashboard_copy", {"source_dashboard_id": 10, "name": "Copy"}, Action.DASHBOARD_CLONE),
+        ("question_delete", {"question_id": 1}, Action.QUESTION_TRASH),
+        (
+            "dashboard_create",
+            {
+                "body": {
+                    "name": "New",
+                    "collection_id": 20,
+                    "width": "fixed",
+                    "dashcards": [
+                        {
+                            "id": -1,
+                            "card_id": 1,
+                            "row": 0,
+                            "col": 0,
+                            "size_x": 6,
+                            "size_y": 4,
+                            "parameter_mappings": [],
+                            "visualization_settings": {},
+                        }
+                    ],
+                }
+            },
+            Action.DASHBOARD_CREATE,
+        ),
+    ],
+)
+def test_exact_actions_survive_generated_native_field_uuid(
+    volatile_native_card,
+    action,
+    arguments,
+    expected_action,
+):
+    service, _ = volatile_native_card
+    prepared = service.action_prepare(action, arguments)
+    result = _execute(service, prepared, expected_action)
+    assert result["outcome"] == Outcome.APPLIED_VERIFIED.value, json.dumps(result, indent=2)
+
+
+def test_scoped_session_survives_generated_native_field_uuid(volatile_native_card):
+    service, _ = volatile_native_card
+    opened = service.edit_session_open("question", 1)
+    for display in ("bar", "line"):
+        result = service.edit_session_apply(
+            opened["session"]["session_id"],
+            [{"op": "set", "path": "/display", "value": display}],
+        )
+        assert result["outcome"] == Outcome.APPLIED_VERIFIED.value
+        assert result["session"]["active"] is True
+
+
+@pytest.mark.parametrize(
+    "changed_field", ["field_id", "field_options", "tag_id", "sql", "timestamp"]
+)
+def test_generated_native_field_uuid_does_not_hide_definition_drift(
+    volatile_native_card,
+    changed_field,
+):
+    service, fake = volatile_native_card
+    opened = service.object_session_open("question", 1)
+    stage = fake.cards[1]["dataset_query"]["stages"][0]
+    tag = stage["template-tags"][0]
+    if changed_field == "field_id":
+        tag["dimension"][2] = 456
+    elif changed_field == "field_options":
+        tag["dimension"][1]["temporal-unit"] = "month"
+    elif changed_field == "tag_id":
+        tag["id"] = "different-persisted-tag-id"
+    elif changed_field == "sql":
+        stage["native"] = "select 2 where {{date}}"
+    else:
+        fake.cards[1]["updated_at"] = "externally-updated"
+    result = service.object_session_query(opened["session"]["session_id"], 1, row_limit=5)
+    assert result["outcome"] == Outcome.REJECTED_STALE.value
+    assert fake.query_calls == []
+    assert fake.put_calls == 0
+
+
 def _v063_native_query(sql: str = "select {{city}}") -> dict[str, Any]:
     return {
         "lib/type": "mbql/query",
