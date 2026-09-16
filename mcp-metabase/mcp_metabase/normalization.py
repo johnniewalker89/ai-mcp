@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from mcp_metabase.models import ObjectType, PatchOperation, PlannedMutation
+from mcp_metabase.notifications import notification_state
 
 
 class MutationValidationError(RuntimeError):
@@ -368,6 +369,8 @@ def dataset_query_semantically_matches(expected: Any, actual: Any) -> bool:
 
 
 def project_state(raw: dict[str, Any], object_type: ObjectType) -> dict[str, Any]:
+    if object_type is ObjectType.NOTIFICATION:
+        return notification_state(raw)
     if not isinstance(raw, dict):
         raise MutationValidationError("Metabase object state must be a JSON object.")
     state = {
@@ -981,6 +984,8 @@ def _build_write_payload(
     state: dict[str, Any],
     changed_roots: tuple[str, ...],
 ) -> dict[str, Any]:
+    if object_type is ObjectType.NOTIFICATION:
+        return copy.deepcopy(state)
     payload = {root: copy.deepcopy(state.get(root)) for root in changed_roots}
     # Metabase processes dashboard tabs and dashcards as one write contract.
     # Round-trip both arrays when either changes so partial payloads cannot be
@@ -1233,6 +1238,8 @@ def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> 
     readback = project_state(raw_readback, mutation.object_type)
     if readback.get("id") != mutation.object_id:
         return False
+    if mutation.object_type is ObjectType.NOTIFICATION:
+        return readback == mutation.after_state
     roots = set(mutation.changed_roots) | (
         set(PROTECTED_ROOTS.get(mutation.object_type, frozenset())) - set(mutation.changed_roots)
     )

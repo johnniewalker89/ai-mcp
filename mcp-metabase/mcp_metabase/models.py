@@ -10,6 +10,7 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 
 
 class ObjectType(StrEnum):
+    NOTIFICATION = "notification"
     QUESTION = "question"
     DASHBOARD = "dashboard"
     COLLECTION = "collection"
@@ -18,6 +19,11 @@ class ObjectType(StrEnum):
 
 
 class Action(StrEnum):
+    NOTIFICATION_CREATE = "notification_create"
+    NOTIFICATION_UPDATE = "notification_update"
+    NOTIFICATION_ROLLBACK = "notification_rollback"
+    QUESTION_BATCH_TRASH = "question_batch_trash"
+    QUESTION_BATCH_RESTORE = "question_batch_restore"
     QUESTION_CREATE = "question_create"
     QUESTION_UPDATE = "question_update"
     QUESTION_CLONE = "question_clone"

@@ -1654,6 +1654,7 @@ def test_mcp_surface_is_compact_without_losing_legacy_contract() -> None:
     tools = {tool.name for tool in asyncio.run(mcp.list_tools())}
     assert tools == {
         "metabase_health",
+        "metabase_notification_list",
         "metabase_search",
         "metabase_object_get",
         "metabase_collection_items",
@@ -2081,7 +2082,7 @@ def test_object_get_view_protocol_and_discovery(runtime, monkeypatch) -> None:
         async with Client(mcp) as client:
             tools = await client.list_tools()
             tool = next(tool for tool in tools if tool.name == "metabase_object_get")
-            assert len(tools) == 14
+            assert len(tools) == 15
             assert tool.inputSchema["properties"]["view"] == {
                 "default": "full",
                 "enum": ["full", "layout"],

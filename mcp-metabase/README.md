@@ -4,7 +4,7 @@ MCP-сервер для работы с Metabase через API key без бр�
 читать, создавать, копировать, изменять, перемещать в корзину и восстанавливать
 карточки, дашборды и коллекции, а также выполнять ограниченный предпросмотр запросов.
 
-Сервер предоставляет 14 инструментов. Произвольные REST-запросы и безвозвратное
+Сервер предоставляет 15 инструментов. Произвольные REST-запросы и безвозвратное
 удаление недоступны: действия `*_delete` перемещают объекты в Trash.
 
 ## Установка из Git
@@ -108,6 +108,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | `metabase_health` | Проверяет подключение, пользователя, версию, режим работы и лимиты |
 | `metabase_search` | Ищет объекты с pagination; `include_ranking_details=false` исключает только `scores` |
 | `metabase_object_get` | Читает объект целиком или только раскладку дашборда (`view="layout"`) |
+| `metabase_notification_list` | Читает уведомления одной карточки с явной локальной пагинацией |
 | `metabase_collection_items` | Показывает элементы и дочерние коллекции выбранной коллекции |
 | `metabase_session_open` | Открывает подтверждаемую рабочую сессию для объекта |
 | `metabase_session_apply` | Применяет изменения внутри открытой сессии |
@@ -181,7 +182,50 @@ field filters сравнение исключает только служебн�
 уменьшает MCP-ответ, а не upstream HTTP payload. Общего cache нет; повторное
 чтение получает актуальный объект, а проверки записей работают как прежде.
 
-### Основные действия
+### Уведомления карточек и пакетная архивация
+
+`metabase_notification_list(question_id, include_inactive=false, limit=20, offset=0)`
+читает API-visible `notification/card`. Legacy Pulse и dashboard subscriptions
+сюда не входят. API фильтрует по карточке, но не поддерживает pagination:
+`total`, `truncated`, `next_offset` относятся к локальной странице, а upstream
+ответ ограничен HTTP byte cap; `upstream_pagination=false` явно отмечает это.
+`metabase_object_get(object_type="notification", object_id=...)` возвращает
+`notification` — безопасную проекцию расписаний/получателей — и полный state hash.
+Channel credentials, hydrated cards/users и неизвестные blobs не выводятся.
+
+Через `metabase_action_prepare` / `metabase_action_execute` доступны:
+
+- `notification_create`: `arguments.body={question_id,cron_schedule,slack_recipient,send_once?}`.
+  Создаёт **неактивное** Slack-уведомление. Отдельное включение требует exact update.
+- `notification_update`: `arguments={notification_id,patch:{send_once?,active?,
+  schedules?:[{subscription_id,cron_schedule,ui_display_type?}],
+  recipients?:[{handler_id,recipient_id,value}]}}`.
+  Расписание — Quartz cron из 6/7 полей; окончательная проверка у провайдера.
+  `ui_display_type`: `cron/raw` или `cron/builder`. Timezone задаётся scheduler
+  инстанса, отдельного поля timezone в этом API нет.
+- `question_batch_trash`: `arguments={question_ids:[...]}`;
+  `question_batch_restore`: тот же список плюс optional `collection_id` или
+  `to_root=true`. Размер ограничен `max_batch_items`; пустой/повторный inventory
+  и неверное исходное archived-состояние отклоняются. Список проверяется до записи.
+
+Update сохраняет неизвестные persisted поля и ID вложенных subscriptions,
+handlers и recipients; не заменяет notification неполным payload. Получателя
+можно менять только у существующего Slack raw-value recipient (`#channel`/`@user`).
+Связанный `details.channel_id`, неполные templates и запрещённый провайдером
+`email/handlebars-resource` отклоняются, чтобы не повредить существующие связи.
+Prepare показывает изменение и побочные эффекты: включение/отключение notification
+может отправить provider subscription emails; активное расписание может сработать позже.
+Отдельных send/test endpoint нет. Notification не входит в work session.
+
+Exact rollback поддерживает подтверждённые notification updates и проверяет свежий
+state hash. Для batch сохранены пообъектные outcomes, rollback только verified
+части и ограниченное восстановление внутри исходного плана при `outcome_unknown`.
+Архивация карточки может отключить зависимые уведомления на стороне Metabase;
+восстановление/rollback карточки не обещает отмену таких побочных эффектов.
+Новые notifications деактивируются через `notification_update(active=false)`;
+permanent delete не добавлен.
+
+### Действия по типам объектов
 
 | Объект | Действия |
 | --- | --- |

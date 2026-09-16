@@ -44,6 +44,13 @@ from mcp_metabase.normalization import (
     validate_state,
     verify_mutation,
 )
+from mcp_metabase.notifications import (
+    NotificationCreate,
+    NotificationPatch,
+    NotificationShapeError,
+    apply_notification_patch,
+    notification_public,
+)
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
 from mcp_metabase.query_policy import validate_native_preview_sql
 
@@ -69,6 +76,10 @@ SEARCH_MODELS = frozenset(
 )
 COMPACT_MUTATION_ACTIONS = frozenset(
     {
+        Action.NOTIFICATION_UPDATE,
+        Action.NOTIFICATION_CREATE,
+        Action.QUESTION_BATCH_TRASH,
+        Action.QUESTION_BATCH_RESTORE,
         Action.QUESTION_CREATE,
         Action.QUESTION_UPDATE,
         Action.QUESTION_CLONE,
@@ -90,6 +101,13 @@ COMPACT_MUTATION_ACTIONS = frozenset(
     }
 )
 COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]] = {
+    Action.NOTIFICATION_UPDATE: (frozenset({"notification_id", "patch"}), frozenset()),
+    Action.NOTIFICATION_CREATE: (frozenset({"body"}), frozenset()),
+    Action.QUESTION_BATCH_TRASH: (frozenset({"question_ids"}), frozenset()),
+    Action.QUESTION_BATCH_RESTORE: (
+        frozenset({"question_ids"}),
+        frozenset({"collection_id", "to_root"}),
+    ),
     Action.QUESTION_CREATE: (frozenset({"body"}), frozenset()),
     Action.QUESTION_CLONE: (
         frozenset({"source_question_id", "name"}),
@@ -131,6 +149,18 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.BATCH: (frozenset({"items"}), frozenset()),
 }
 COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
+    Action.NOTIFICATION_UPDATE: (
+        "arguments={notification_id,patch:{send_once?,active?,"
+        "schedules?:[{subscription_id,cron_schedule,ui_display_type?}],"
+        "recipients?:[{handler_id,recipient_id,value}]}}"
+    ),
+    Action.NOTIFICATION_CREATE: (
+        "arguments.body={question_id,cron_schedule,slack_recipient,send_once?}; inactive only"
+    ),
+    Action.QUESTION_BATCH_TRASH: "arguments={question_ids:[positive_integer]}",
+    Action.QUESTION_BATCH_RESTORE: (
+        "arguments={question_ids:[positive_integer],collection_id?,to_root?}"
+    ),
     Action.QUESTION_CREATE: (
         "arguments.body={name,dataset_query,display,visualization_settings?,collection_id?,"
         "description?,parameters?,parameter_mappings?,cache_ttl?,type?}"
@@ -332,7 +362,9 @@ class MetabaseRuntime:
                 "rollback": True,
                 "full_object_sessions": True,
                 "scoped_edit_sessions": True,
-                "public_tool_count": 14,
+                "public_tool_count": 15,
+                "card_notifications": True,
+                "question_batch_lifecycle": True,
                 "permanent_delete": False,
                 "generic_api": False,
                 "arbitrary_sql": False,
@@ -474,6 +506,7 @@ class MetabaseRuntime:
     def _object_raw(self, object_type: ObjectType, object_id: int) -> dict[str, Any]:
         object_id = self._positive_id(object_id, f"{object_type.value} id")
         paths = {
+            ObjectType.NOTIFICATION: f"/api/notification/{object_id}",
             ObjectType.QUESTION: f"/api/card/{object_id}",
             ObjectType.DASHBOARD: f"/api/dashboard/{object_id}",
             ObjectType.COLLECTION: f"/api/collection/{object_id}",
@@ -485,6 +518,8 @@ class MetabaseRuntime:
             raise MutationValidationError(
                 f"Metabase {object_type.value} endpoint returned an invalid shape."
             )
+        if object_type is ObjectType.NOTIFICATION and payload.get("id") != object_id:
+            raise MutationValidationError("Notification read violated its exact id binding.")
         return payload
 
     def _full_object(self, object_type: ObjectType, object_id: int) -> dict[str, Any]:
@@ -500,6 +535,159 @@ class MetabaseRuntime:
 
     def question_get_full(self, question_id: int) -> dict[str, Any]:
         return self._full_object(ObjectType.QUESTION, question_id)
+
+    def notification_get(self, notification_id: int) -> dict[str, Any]:
+        raw = self._object_raw(ObjectType.NOTIFICATION, notification_id)
+        state = project_state(raw, ObjectType.NOTIFICATION)
+        return {
+            "origin": self.config.origin,
+            "object_type": "notification",
+            "object_id": notification_id,
+            "state_sha256": object_state_sha256(state, ObjectType.NOTIFICATION),
+            "notification": notification_public(raw),
+        }
+
+    def notification_list(
+        self,
+        question_id: int,
+        *,
+        include_inactive: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        question_id = self._positive_id(question_id, "question_id")
+        if type(include_inactive) is not bool or type(limit) is not int or type(offset) is not int:
+            raise MutationValidationError("Notification list requires boolean/int arguments.")
+        if not 1 <= limit <= self.config.max_list_items or offset < 0:
+            raise MutationValidationError("Notification list page is outside configured bounds.")
+        raw = self.http.get_json(
+            "/api/notification",
+            params={
+                "card_id": question_id,
+                "payload_type": "notification/card",
+                "include_inactive": str(include_inactive).lower(),
+            },
+        )
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            raise MutationValidationError("Notification list returned an invalid shape.")
+        # Upstream поддерживает card filter, но не pagination; HTTP bytes уже ограничены.
+        if any(
+            not isinstance(item.get("payload"), dict)
+            or item["payload"].get("card_id") != question_id
+            or (not include_inactive and item.get("active") is not True)
+            for item in raw
+        ):
+            raise MutationValidationError("Notification list violated its exact card binding.")
+        rows = sorted(raw, key=lambda item: self._positive_id(item.get("id"), "notification_id"))
+        if len({row["id"] for row in rows}) != len(rows):
+            raise MutationValidationError("Notification list contains duplicate ids.")
+        items = [notification_public(row) for row in rows[offset : offset + limit]]
+        more = offset + len(items) < len(rows)
+        return {
+            "origin": self.config.origin,
+            "kind": "card_notification",
+            "question_id": question_id,
+            "items": items,
+            "total": len(rows),
+            "limit": limit,
+            "offset": offset,
+            "truncated": more,
+            "next_offset": offset + len(items) if more else None,
+            "scope": "API-key-visible card notifications; legacy Pulse excluded",
+            "upstream_pagination": False,
+        }
+
+    def notification_create_prepare(self, body: dict[str, Any]) -> dict[str, Any]:
+        context = self._write_context()
+        try:
+            request = NotificationCreate.model_validate(body)
+        except ValidationError as exc:
+            raise self._validation_error(
+                exc, action=Action.NOTIFICATION_CREATE, path_prefix="arguments.body"
+            ) from None
+        question = self._object_raw(ObjectType.QUESTION, request.question_id)
+        if question.get("archived") is not False:
+            raise MutationValidationError("Notification requires an unarchived question.")
+        target = self._collection_baseline(question.get("collection_id"))
+        target.update(
+            {
+                "create_kind": "notification",
+                "question_bindings": [
+                    {
+                        "question_id": request.question_id,
+                        "state_sha256": object_state_sha256(
+                            project_state(question, ObjectType.QUESTION), ObjectType.QUESTION
+                        ),
+                    }
+                ],
+                "active": False,
+                "slack_recipient": request.slack_recipient,
+                "cron_schedule": request.cron_schedule,
+                "send_once": request.send_once,
+                "side_effects": "Created inactive; activation requires a separate exact update.",
+            }
+        )
+        payload = request.payload()
+        mutation = PlannedMutation(
+            object_type=ObjectType.NOTIFICATION,
+            object_id=None,
+            before_state=None,
+            after_state=copy.deepcopy(payload),
+            write_payload=payload,
+            changed_roots=tuple(payload),
+            before_sha256=None,
+            after_sha256=canonical_sha256(payload),
+            target=target,
+        )
+        return self._prepare_plan(
+            context=context,
+            action=Action.NOTIFICATION_CREATE,
+            mutations=[mutation],
+            arguments={"body": request.model_dump(mode="json")},
+        )
+
+    def notification_update_prepare(
+        self, notification_id: int, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        context = self._write_context()
+        try:
+            request = NotificationPatch.model_validate(patch)
+        except ValidationError as exc:
+            raise self._validation_error(
+                exc, action=Action.NOTIFICATION_UPDATE, path_prefix="arguments.patch"
+            ) from None
+        raw = self._object_raw(ObjectType.NOTIFICATION, notification_id)
+        before = project_state(raw, ObjectType.NOTIFICATION)
+        after = apply_notification_patch(before, request)
+        roots = tuple(key for key in before if before[key] != after[key])
+        mutation = PlannedMutation(
+            object_type=ObjectType.NOTIFICATION,
+            object_id=before["id"],
+            before_state=before,
+            after_state=after,
+            write_payload=copy.deepcopy(after),
+            changed_roots=roots,
+            before_sha256=object_state_sha256(before, ObjectType.NOTIFICATION),
+            after_sha256=object_state_sha256(after, ObjectType.NOTIFICATION),
+            target={
+                "card_id": before["payload"]["card_id"],
+                "before": notification_public(raw),
+                "after": notification_public(after),
+                "side_effects": (
+                    "Changing active may send provider subscription emails; "
+                    "active schedules may deliver later. No send/test endpoint is called."
+                ),
+            },
+        )
+        return self._prepare_plan(
+            context=context,
+            action=Action.NOTIFICATION_UPDATE,
+            mutations=[mutation],
+            arguments={
+                "notification_id": notification_id,
+                "patch": request.model_dump(mode="json", exclude_unset=True),
+            },
+        )
 
     def dashboard_get_full(self, dashboard_id: int) -> dict[str, Any]:
         return self._full_object(ObjectType.DASHBOARD, dashboard_id)
@@ -579,6 +767,8 @@ class MetabaseRuntime:
             )
         if object_type == "question":
             return self.question_get_full(object_id)
+        if object_type == "notification":
+            return self.notification_get(object_id)
         if object_type == "dashboard":
             if view == "layout":
                 return self.dashboard_get_layout(object_id)
@@ -2792,6 +2982,70 @@ class MetabaseRuntime:
             arguments=arguments,
         )
 
+    def question_batch_lifecycle_prepare(
+        self,
+        question_ids: list[int],
+        *,
+        restore: bool = False,
+        collection_id: int | None = None,
+        to_root: bool = False,
+    ) -> dict[str, Any]:
+        context = self._write_context()
+        if (
+            not isinstance(question_ids, list)
+            or not 1 <= len(question_ids) <= self.config.max_batch_items
+        ):
+            raise MutationValidationError("Lifecycle inventory exceeds the configured batch bound.")
+        ids = [self._positive_id(value, "question_id") for value in question_ids]
+        if len(set(ids)) != len(ids):
+            raise MutationValidationError("Lifecycle inventory contains duplicate question ids.")
+        if type(to_root) is not bool or (to_root and collection_id is not None):
+            raise MutationValidationError("Restore destination must be one collection or root.")
+        if not restore and (collection_id is not None or to_root):
+            raise MutationValidationError("Trash does not accept a restore destination.")
+        if collection_id is not None:
+            self._positive_id(collection_id, "collection_id")
+        mutations = []
+        for question_id in ids:
+            raw = self._object_raw(ObjectType.QUESTION, question_id)
+            if raw.get("archived") is not restore:
+                raise MutationValidationError(
+                    "Every lifecycle target must be in the expected initial state."
+                )
+            operations = [PatchOperation(op="set", path="/archived", value=not restore)]
+            if restore and (to_root or collection_id is not None):
+                operations.append(
+                    PatchOperation(op="set", path="/collection_id", value=collection_id)
+                )
+            mutation = self._build_runtime_mutation(
+                object_type=ObjectType.QUESTION,
+                raw_before=raw,
+                operations=operations,
+            )
+            mutation.target.update(
+                {
+                    "name": raw.get("name"),
+                    "original_collection_id": raw.get("collection_id"),
+                    "dashboard_count": raw.get("dashboard_count"),
+                    "side_effects": (
+                        "Provider archive may disable dependent notifications. "
+                        "Restore/rollback restores card state, not those side effects."
+                    ),
+                }
+            )
+            mutations.append(mutation)
+        return self._prepare_plan(
+            context=context,
+            action=Action.QUESTION_BATCH_RESTORE if restore else Action.QUESTION_BATCH_TRASH,
+            mutations=mutations,
+            arguments={
+                "question_ids": ids,
+                "restore": restore,
+                "collection_id": collection_id,
+                "to_root": to_root,
+            },
+        )
+
     @staticmethod
     def _closed_action_arguments(
         requested_action: str,
@@ -2876,6 +3130,19 @@ class MetabaseRuntime:
         elif selected is Action.QUESTION_UPDATE:
             self._reject_lifecycle_patch(arguments["operations"])
             result = self.question_update_prepare(arguments["question_id"], arguments["operations"])
+        elif selected is Action.NOTIFICATION_CREATE:
+            result = self.notification_create_prepare(arguments["body"])
+        elif selected is Action.NOTIFICATION_UPDATE:
+            result = self.notification_update_prepare(
+                arguments["notification_id"], arguments["patch"]
+            )
+        elif selected in {Action.QUESTION_BATCH_TRASH, Action.QUESTION_BATCH_RESTORE}:
+            result = self.question_batch_lifecycle_prepare(
+                arguments["question_ids"],
+                restore=selected is Action.QUESTION_BATCH_RESTORE,
+                collection_id=arguments.get("collection_id"),
+                to_root=arguments.get("to_root", False),
+            )
         elif selected is Action.QUESTION_TRASH:
             result = self.question_trash_prepare(arguments["question_id"])
         elif selected is Action.QUESTION_RESTORE:
@@ -2963,6 +3230,10 @@ class MetabaseRuntime:
         if not open_session or result.get("outcome") != Outcome.APPLIED_VERIFIED.value:
             return result
         if plan.action in {
+            Action.QUESTION_BATCH_TRASH,
+            Action.QUESTION_BATCH_RESTORE,
+            Action.NOTIFICATION_UPDATE,
+            Action.NOTIFICATION_CREATE,
             Action.QUESTION_TRASH,
             Action.DASHBOARD_TRASH,
             Action.COLLECTION_TRASH,
@@ -3104,6 +3375,7 @@ class MetabaseRuntime:
         if mutation.object_id is None:
             raise MutationValidationError("Metabase update mutation has no object id.")
         prefixes = {
+            ObjectType.NOTIFICATION: "notification",
             ObjectType.QUESTION: "card",
             ObjectType.DASHBOARD: "dashboard",
             ObjectType.COLLECTION: "collection",
@@ -3136,7 +3408,7 @@ class MetabaseRuntime:
                     raise MutationValidationError("Metabase update mutation has no object id.")
                 readback = self._object_raw(mutation.object_type, mutation.object_id)
                 readback_state = project_state(readback, mutation.object_type)
-            except (MetabaseApiError, MutationValidationError):
+            except (MetabaseApiError, MutationValidationError, NotificationShapeError):
                 last_result = {
                     "object_type": mutation.object_type.value,
                     "object_id": mutation.object_id,
@@ -3531,7 +3803,7 @@ class MetabaseRuntime:
             return raw, object_state_sha256(
                 project_state(raw, mutation.object_type), mutation.object_type
             )
-        except (MetabaseApiError, MutationValidationError):
+        except (MetabaseApiError, MutationValidationError, NotificationShapeError):
             return None, None
 
     @classmethod
@@ -3607,7 +3879,11 @@ class MetabaseRuntime:
             "cleanup_candidate": {
                 "object_type": mutation.object_type.value,
                 "object_id": created_id,
-                "recommended_action": "trash_prepare",
+                "recommended_action": (
+                    "notification_update(active=false)"
+                    if mutation.object_type is ObjectType.NOTIFICATION
+                    else "trash_prepare"
+                ),
             },
         }
         if partial_stage is not None and outcome is not Outcome.APPLIED_VERIFIED:
@@ -3793,6 +4069,8 @@ class MetabaseRuntime:
             }
         if plan.action in {Action.QUESTION_CREATE, Action.QUESTION_CLONE}:
             path = "/api/card"
+        elif plan.action is Action.NOTIFICATION_CREATE:
+            path = "/api/notification"
         elif plan.action in {Action.COLLECTION_CREATE, Action.COLLECTION_CLONE}:
             path = "/api/collection"
         elif plan.action is Action.DASHBOARD_CLONE:
@@ -3958,6 +4236,8 @@ class MetabaseRuntime:
             )
 
         update_actions = {
+            Action.NOTIFICATION_UPDATE,
+            Action.NOTIFICATION_ROLLBACK,
             Action.QUESTION_UPDATE,
             Action.QUESTION_TRASH,
             Action.QUESTION_RESTORE,
@@ -3974,6 +4254,7 @@ class MetabaseRuntime:
             Action.FIELD_ROLLBACK,
         }
         simple_create_actions = {
+            Action.NOTIFICATION_CREATE,
             Action.QUESTION_CREATE,
             Action.QUESTION_CLONE,
             Action.DASHBOARD_CLONE,
@@ -3983,7 +4264,12 @@ class MetabaseRuntime:
         try:
             if plan.action in update_actions:
                 outcome, details = self._execute_single_update(plan.mutations[0])
-            elif plan.action in {Action.BATCH, Action.BATCH_ROLLBACK}:
+            elif plan.action in {
+                Action.BATCH,
+                Action.BATCH_ROLLBACK,
+                Action.QUESTION_BATCH_TRASH,
+                Action.QUESTION_BATCH_RESTORE,
+            }:
                 outcome, details = self._execute_batch(plan)
             elif plan.action is Action.DASHBOARD_CREATE:
                 outcome, details = self._execute_dashboard_create(plan.mutations[0])
@@ -4004,7 +4290,7 @@ class MetabaseRuntime:
                 "applied_indexes": [],
                 "rollback_candidates": [],
             }
-        except (MetabasePolicyError, MutationValidationError):
+        except (MetabasePolicyError, MutationValidationError, NotificationShapeError):
             outcome = Outcome.REJECTED_VALIDATION
             details = {
                 "reason": "exact_plan_validation_failed_during_execution",
@@ -4062,6 +4348,17 @@ class MetabaseRuntime:
                 source_mutation.object_id,
             )
             mutation = rollback_mutation(source_mutation, current_raw)
+            if mutation.object_type is ObjectType.NOTIFICATION:
+                mutation.target.update(
+                    {
+                        "before": notification_public(current_raw),
+                        "after": notification_public(mutation.after_state),
+                        "side_effects": (
+                            "Changing active may send subscription emails; "
+                            "active schedules may deliver later."
+                        ),
+                    }
+                )
             mutation.target.update(
                 {
                     "rollback_of_plan_id": source.plan_id,
@@ -4076,6 +4373,7 @@ class MetabaseRuntime:
             mutations.append(mutation)
 
         rollback_actions = {
+            ObjectType.NOTIFICATION: Action.NOTIFICATION_ROLLBACK,
             ObjectType.QUESTION: Action.QUESTION_ROLLBACK,
             ObjectType.DASHBOARD: Action.DASHBOARD_ROLLBACK,
             ObjectType.COLLECTION: Action.COLLECTION_ROLLBACK,

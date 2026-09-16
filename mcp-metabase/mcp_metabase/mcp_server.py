@@ -10,6 +10,7 @@ from mcp_metabase.config import ConfigurationError, MetabaseConfig
 from mcp_metabase.http_client import MetabaseApiError
 from mcp_metabase.models import Action
 from mcp_metabase.normalization import MutationValidationError
+from mcp_metabase.notifications import NotificationShapeError
 from mcp_metabase.plans import MetabasePolicyError
 from mcp_metabase.service import MetabaseRuntime
 
@@ -18,6 +19,10 @@ logger = logging.getLogger(MCP_SERVER_NAME)
 mcp = FastMCP(name=MCP_SERVER_NAME)
 _RUNTIME: MetabaseRuntime | None = None
 CompactActionName = Literal[
+    "notification_update",
+    "notification_create",
+    "question_batch_trash",
+    "question_batch_restore",
     "question_create",
     "question_copy",
     "question_update",
@@ -64,6 +69,7 @@ def _call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         MetabaseApiError,
         MetabasePolicyError,
         MutationValidationError,
+        NotificationShapeError,
     ) as exc:
         raise ToolError(str(exc)) from exc
     except OSError as exc:
@@ -599,6 +605,7 @@ def metabase_search(
 @mcp.tool()
 def metabase_object_get(
     object_type: Literal[
+        "notification",
         "question",
         "dashboard",
         "collection",
@@ -631,6 +638,28 @@ def metabase_object_get(
         include_fields=include_fields,
         limit=limit,
         view=view,
+    )
+
+
+@mcp.tool()
+def metabase_notification_list(
+    question_id: int,
+    include_inactive: bool = False,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read API-visible card notifications with local paging; excludes legacy Pulse.
+
+    Use object_get(notification, id) for an exact read and notification_update
+    through action_prepare/execute for bound schedule/recipient/send_once changes.
+    Upstream is card-filtered and byte-bounded, but does not paginate.
+    """
+    return _call(
+        "notification_list",
+        question_id,
+        include_inactive=include_inactive,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -717,7 +746,18 @@ def metabase_action_prepare(
     action: CompactActionName,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Prepare one exact action; create payloads use arguments.body, updates use id+operations."""
+    """Prepare one exact action without writing; ordinary creates use arguments.body.
+
+    notification_create: body {question_id,cron_schedule,slack_recipient,send_once?};
+    creates inactive Slack card notification. notification_update: {notification_id,
+    patch:{active?,send_once?,schedules?:[{subscription_id,cron_schedule,ui_display_type?}],
+    recipients?:[{handler_id,recipient_id,value}]}}. ui_display_type is cron/raw or
+    cron/builder; timezone is instance-owned. No send/test action. Changes to active
+    may cause subscription emails and scheduled delivery.
+    question_batch_trash: {question_ids:[id,...]}; question_batch_restore adds optional
+    collection_id or to_root. Bounded exact inventory, per-object reconciliation.
+    Other updates use id+operations; lifecycle is excluded from generic patches.
+    """
     return _call("action_prepare", action, arguments)
 
 
@@ -752,6 +792,7 @@ def metabase_rollback_execute(plan_id: str, digest: str) -> dict[str, Any]:
         Action.DASHBOARD_ROLLBACK,
         Action.COLLECTION_ROLLBACK,
         Action.FIELD_ROLLBACK,
+        Action.NOTIFICATION_ROLLBACK,
         Action.BATCH_ROLLBACK,
     )
 
