@@ -148,13 +148,16 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | `field_values` | `values` и `truncated` на верхнем уровне; остальные metadata upstream сохранены |
 
 `state_sha256` — hash сравниваемого состояния, а не raw JSON ответа. Для native
-field filters сравнение исключает только служебный `lib/uuid` из options
+field filters сравнение исключает только служебные `lib/uuid` и
+`lib/transformation-added-base-type` из options
 `template-tags[].dimension = ["field", options, field_id]`: Metabase может
-генерировать его заново при каждом чтении. Та же нормализация действует для
+генерировать UUID заново при чтении и удалять маркер преобразования при записи.
+Сами `base-type`, `effective-type` и остальные semantic options остаются связанными.
+Та же нормализация действует для
 сессий, exact actions, копирования, проверки результата и отката, включая
 вложенные карточки дашборда. Field id, остальные options, SQL, tag/parameter ids
 и признаки редактирования сохраняются в сравнении. Исходные snapshots,
-возвращаемые объекты и write payload не теряют UUID. После обновления MCP
+возвращаемые объекты и write payload сохраняются без удаления этих полей. После обновления MCP
 прежние process-local планы и сессии нужно открыть заново.
 
 Например, поля таблицы находятся в `structuredContent.table.fields`, а не

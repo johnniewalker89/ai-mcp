@@ -194,7 +194,7 @@ def canonical_sha256(value: Any) -> str:
 
 
 def _native_field_filter_comparison(value: Any) -> Any:
-    """Ignore only read-generated UUIDs on native template-tag field references."""
+    """Ignore provider-managed annotations on native template-tag field references."""
     result = copy.deepcopy(value)
     if not isinstance(result, dict):
         return result
@@ -231,11 +231,14 @@ def _native_field_filter_comparison(value: Any) -> Any:
                 # v0.63 may assign a fresh field-clause UUID on every GET. The
                 # field id and all other options remain bound; payloads stay raw.
                 dimension[1].pop("lib/uuid", None)
+                # The provider can drop this conversion provenance marker on PUT.
+                # Keep base-type/effective-type and every semantic option bound.
+                dimension[1].pop("lib/transformation-added-base-type", None)
     return result
 
 
 def object_state_sha256(state: dict[str, Any], object_type: ObjectType) -> str:
-    """Hash object state without volatile native field-filter clause identities."""
+    """Hash state without provider-managed native field-filter annotations."""
     comparison = copy.deepcopy(state)
     if object_type is ObjectType.QUESTION and "dataset_query" in comparison:
         comparison["dataset_query"] = _native_field_filter_comparison(comparison["dataset_query"])

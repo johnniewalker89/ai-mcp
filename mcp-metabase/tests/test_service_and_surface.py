@@ -247,6 +247,51 @@ def _execute(runtime: MetabaseRuntime, plan: dict[str, Any], action: Action) -> 
     )
 
 
+@pytest.mark.parametrize("lost_response", [False, True])
+@pytest.mark.parametrize("field_drift", [False, True])
+def test_native_field_annotation_readback_reconciles_once(
+    runtime, native_field_filter_query, lost_response, field_drift
+) -> None:
+    service, fake = runtime
+    fake.cards[1]["dataset_query"] = copy.deepcopy(native_field_filter_query)
+    query = copy.deepcopy(native_field_filter_query)
+    query["stages"][0]["native"] = "select 2 where {{date}}"
+    query["stages"][0]["template-tags"][0]["dimension"][1].update(
+        {"base-type": "type/Date", "lib/transformation-added-base-type": True}
+    )
+    plan = service.question_update_prepare(
+        1, [{"op": "set", "path": "/dataset_query", "value": query}]
+    )
+    original_put = fake.put_json
+
+    def normalize_put(path, body):
+        original_put(path, body)
+        dimension = fake.cards[1]["dataset_query"]["stages"][0]["template-tags"][0]["dimension"]
+        dimension[1].pop("lib/transformation-added-base-type", None)
+        if field_drift:
+            dimension[2] = 456
+        if lost_response:
+            raise MetabaseApiError("lost response", outcome_unknown=True)
+        return copy.deepcopy(fake.cards[1])
+
+    fake.put_json = normalize_put
+    result = _execute(service, plan, Action.QUESTION_UPDATE)
+    assert fake.put_calls == 1
+    assert result["outcome"] == (
+        Outcome.OUTCOME_UNKNOWN.value if field_drift else Outcome.APPLIED_VERIFIED.value
+    )
+    assert result["object_results"][0]["reconciliation_attempts"] == (
+        MUTATION_RECONCILIATION_ATTEMPTS if field_drift else 1
+    )
+    if not field_drift:
+        rollback = service.rollback_prepare(plan["plan_id"])
+        assert (
+            _execute(service, rollback, Action.QUESTION_ROLLBACK)["outcome"] == "applied_verified"
+        )
+        assert fake.put_calls == 2
+        assert fake.cards[1]["dataset_query"] == native_field_filter_query
+
+
 @pytest.fixture
 def volatile_native_card(runtime, native_field_filter_query):
     service, fake = runtime
@@ -500,13 +545,20 @@ def test_text_update_preserves_query_refreshed_metadata(runtime, root) -> None:
     assert fake.cards[1]["result_metadata"] == refreshed
 
 
-@pytest.mark.parametrize("field,value", [
-    ("name", "Another title"), ("description", "Another description"), ("updated_at", "u1"),
-    ("last-edit-info", {"id": 99}), ("archived", True), ("collection_id", 30),
-    ("dataset_query", {"type": "query", "database": 50, "query": {"limit": 10}}),
-    ("visualization_settings", {"table.columns": [{"name": "other"}]}),
-    ("parameters", [{"id": "different"}]),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("name", "Another title"),
+        ("description", "Another description"),
+        ("updated_at", "u1"),
+        ("last-edit-info", {"id": 99}),
+        ("archived", True),
+        ("collection_id", 30),
+        ("dataset_query", {"type": "query", "database": 50, "query": {"limit": 10}}),
+        ("visualization_settings", {"table.columns": [{"name": "other"}]}),
+        ("parameters", [{"id": "different"}]),
+    ],
+)
 def test_text_update_still_rejects_definition_or_edit_drift(runtime, field, value) -> None:
     service, fake = runtime
     plan = service.question_update_prepare(
@@ -518,12 +570,19 @@ def test_text_update_still_rejects_definition_or_edit_drift(runtime, field, valu
     assert fake.put_calls == 0
 
 
-@pytest.mark.parametrize("operation", [
-    {"op": "set", "path": "/dataset_query/query/limit", "value": 10},
-    {"op": "set", "path": "/visualization_settings/table.cell_column", "value": "count"},
-    {"op": "replace_array", "path": "/result_metadata", "value": [{"name": "new"}]},
-    {"op": "replace_array", "path": "/parameters", "value": [{"id": "new", "type": "category"}]},
-])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {"op": "set", "path": "/dataset_query/query/limit", "value": 10},
+        {"op": "set", "path": "/visualization_settings/table.cell_column", "value": "count"},
+        {"op": "replace_array", "path": "/result_metadata", "value": [{"name": "new"}]},
+        {
+            "op": "replace_array",
+            "path": "/parameters",
+            "value": [{"id": "new", "type": "category"}],
+        },
+    ],
+)
 def test_nontext_update_keeps_full_metadata_binding(runtime, operation) -> None:
     service, fake = runtime
     plan = service.question_update_prepare(1, [operation])

@@ -2688,7 +2688,8 @@ class MetabaseRuntime:
         if object_type is ObjectType.QUESTION:
             mutation.target["dashboard_count"] = raw.get("dashboard_count")
             if action is Action.QUESTION_UPDATE and set(mutation.changed_roots) <= {
-                "name", "description"
+                "name",
+                "description",
             }:
                 mutation.target["query_metadata_independent"] = True
         if object_type is ObjectType.DASHBOARD:

@@ -71,11 +71,16 @@ def test_question_projection_preserves_missing_arrays_and_unrelated_nulls():
 
 
 @pytest.mark.parametrize("query_shape", ["mbql-native", "legacy-native"])
+@pytest.mark.parametrize("stripped_annotation", ["lib/uuid", "lib/transformation-added-base-type"])
 def test_native_field_uuid_comparison_preserves_snapshots_and_payload(
     native_field_filter_query,
     query_shape,
+    stripped_annotation,
 ):
     query = copy.deepcopy(native_field_filter_query)
+    query["stages"][0]["template-tags"][0]["dimension"][1].update(
+        {"base-type": "type/Date", "lib/transformation-added-base-type": True}
+    )
     if query_shape == "legacy-native":
         stage = query["stages"][0]
         query = {
@@ -99,6 +104,7 @@ def test_native_field_uuid_comparison_preserves_snapshots_and_payload(
     else:
         tag = observed["dataset_query"]["native"]["template-tags"]["date"]
     tag["dimension"][1]["lib/uuid"] = "00000000-0000-4000-8000-000000000002"
+    tag["dimension"][1].pop(stripped_annotation)
     assert mutation.after_sha256 == object_state_sha256(observed, ObjectType.QUESTION)
     assert verify_mutation(mutation, observed)
     assert mutation.write_payload["dataset_query"] == operations[0].value
@@ -110,12 +116,35 @@ def test_native_field_uuid_comparison_preserves_snapshots_and_payload(
     assert not verify_mutation(mutation, observed)
 
 
+@pytest.mark.parametrize("key", ["base-type", "effective-type", "source-field", "join-alias"])
+def test_native_field_annotation_normalization_keeps_semantic_options(
+    native_field_filter_query, key
+):
+    before = _question()
+    before["dataset_query"] = copy.deepcopy(native_field_filter_query)
+    options = before["dataset_query"]["stages"][0]["template-tags"][0]["dimension"][1]
+    options.update({key: "original", "lib/transformation-added-base-type": True})
+    mutation = build_mutation(
+        object_type=ObjectType.QUESTION,
+        raw_before=before,
+        operations=[PatchOperation(op="set", path="/description", value="Updated")],
+    )
+    observed = copy.deepcopy(mutation.after_state)
+    observed_options = observed["dataset_query"]["stages"][0]["template-tags"][0]["dimension"][1]
+    observed_options.pop("lib/transformation-added-base-type")
+    observed_options[key] = "different"
+    assert not verify_mutation(mutation, observed)
+    assert mutation.after_sha256 != object_state_sha256(observed, ObjectType.QUESTION)
+
+
 @pytest.mark.parametrize(
     "location", ["tag-id", "default", "field-options", "stage", "gui-clause", "visualization"]
 )
+@pytest.mark.parametrize("annotation", ["lib/uuid", "lib/transformation-added-base-type"])
 def test_object_hash_keeps_uuid_fields_outside_native_dimension_clause(
     native_field_filter_query,
     location,
+    annotation,
 ):
     before = _question()
     before["dataset_query"] = copy.deepcopy(native_field_filter_query)
@@ -124,16 +153,16 @@ def test_object_hash_keeps_uuid_fields_outside_native_dimension_clause(
     if location == "tag-id":
         target, key = tag, "id"
     elif location == "default":
-        target, key = tag.setdefault("default", {}), "lib/uuid"
+        target, key = tag.setdefault("default", {}), annotation
     elif location == "field-options":
         target, key = tag["dimension"][1], "source-field"
     elif location == "stage":
-        target, key = stage, "lib/uuid"
+        target, key = stage, annotation
     elif location == "gui-clause":
         stage["lib/type"] = "mbql.stage/mbql"
-        target, key = tag["dimension"][1], "lib/uuid"
+        target, key = tag["dimension"][1], annotation
     else:
-        target, key = before["visualization_settings"], "lib/uuid"
+        target, key = before["visualization_settings"], annotation
     target[key] = "original"
     digest = object_state_sha256(before, ObjectType.QUESTION)
     target[key] = "changed"
