@@ -16,6 +16,60 @@ from mcp_metabase.normalization import (
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
 
 
+@pytest.mark.parametrize("root", ["parameters", "parameter_mappings"])
+def test_legacy_question_null_array_projection_and_explicit_replacement(root):
+    raw = _question()
+    raw[root] = None
+    original = copy.deepcopy(raw)
+    projected = project_state(raw, ObjectType.QUESTION)
+    assert projected[root] == []
+    assert raw == original
+    replacement = [{"id": "parameter-1"}]
+    mutation = build_mutation(
+        object_type=ObjectType.QUESTION,
+        raw_before=raw,
+        operations=[PatchOperation(op="replace_array", path=f"/{root}", value=replacement)],
+    )
+    assert mutation.write_payload == {root: replacement}
+    assert verify_mutation(mutation, {**raw, root: replacement})
+    assert not verify_mutation(mutation, raw)
+
+
+@pytest.mark.parametrize("root", ["parameters", "parameter_mappings"])
+@pytest.mark.parametrize("invalid", [{}, "", False, 0])
+def test_legacy_question_array_normalization_rejects_other_types(root, invalid):
+    raw = _question()
+    raw[root] = invalid
+    with pytest.raises(MutationValidationError, match=f"Question {root} must be an array"):
+        build_mutation(
+            object_type=ObjectType.QUESTION,
+            raw_before=raw,
+            operations=[PatchOperation(op="set", path="/archived", value=True)],
+        )
+
+
+@pytest.mark.parametrize("root", ["parameters", "parameter_mappings"])
+def test_legacy_question_normalization_does_not_accept_explicit_null_write(root):
+    raw = _question()
+    raw[root] = None
+    with pytest.raises(MutationValidationError, match=f"Question {root} must be an array"):
+        build_mutation(
+            object_type=ObjectType.QUESTION,
+            raw_before=raw,
+            operations=[PatchOperation(op="set", path=f"/{root}", value=None)],
+        )
+
+
+def test_question_projection_preserves_missing_arrays_and_unrelated_nulls():
+    raw = _question()
+    raw.pop("parameters", None)
+    raw.pop("parameter_mappings", None)
+    raw["result_metadata"] = None
+    projected = project_state(raw, ObjectType.QUESTION)
+    assert "parameters" not in projected and "parameter_mappings" not in projected
+    assert projected["result_metadata"] is None
+
+
 @pytest.mark.parametrize("query_shape", ["mbql-native", "legacy-native"])
 def test_native_field_uuid_comparison_preserves_snapshots_and_payload(
     native_field_filter_query,

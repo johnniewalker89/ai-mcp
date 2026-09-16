@@ -381,6 +381,12 @@ def project_state(raw: dict[str, Any], object_type: ObjectType) -> dict[str, Any
     # other invalid non-object values must still fail validation.
     if object_type is ObjectType.FIELD and "settings" in state and state["settings"] is None:
         state["settings"] = {}
+    # Legacy cards expose unset parameter arrays as null. Normalize only the
+    # authoritative snapshot; writes still include only explicitly changed roots.
+    if object_type is ObjectType.QUESTION:
+        for root in ("parameters", "parameter_mappings"):
+            if root in state and state[root] is None:
+                state[root] = []
     if type(state.get("id")) is not int or state["id"] <= 0:
         raise MutationValidationError("Metabase object has no positive immutable id.")
     return state

@@ -300,6 +300,65 @@ def test_batch_all_inventory_stale_preflight_no_partial_write(runtime):
     assert fake.put_calls == 0
 
 
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("provider_returns_empty_arrays", [False, True])
+def test_legacy_null_arrays_lifecycle_restore_rollback_preserve_payload(
+    runtime, batch, provider_returns_empty_arrays
+):
+    service, fake = runtime
+    for card in fake.cards.values():
+        card.update(parameters=None, parameter_mappings=None)
+    original = copy.deepcopy(fake.cards)
+    sent = []
+    original_put = fake.put_json
+
+    def put(path, body):
+        sent.append(copy.deepcopy(body))
+        result = original_put(path, body)
+        if provider_returns_empty_arrays:
+            fake.cards[int(path.rsplit("/", 1)[1])].update(parameters=[], parameter_mappings=[])
+        return result
+
+    fake.put_json = put
+    ids = [1, 2] if batch else [1]
+    args = {"question_ids": ids} if batch else {"question_id": 1}
+    prefix = "question_batch" if batch else "question"
+    plan = service.action_prepare(prefix + "_trash", args)
+    assert fake.cards == original and fake.put_calls == 0
+    assert execute(service, plan)["outcome"] == "applied_verified"
+    restore = service.action_prepare(prefix + "_restore", {**args, "collection_id": 30})
+    assert execute(service, restore)["outcome"] == "applied_verified"
+    rollback = service.rollback_prepare(restore["plan_id"])
+    result = service.exact_action_execute(
+        rollback["plan_id"],
+        rollback["digest"],
+        expected_actions={Action.BATCH_ROLLBACK if batch else Action.QUESTION_ROLLBACK},
+    )
+    assert result["outcome"] == "applied_verified"
+    assert sent == (
+        [{"archived": True}] * len(ids)
+        + [{"archived": False, "collection_id": 30}] * len(ids)
+        + [{"archived": True, "collection_id": 20}] * len(ids)
+    )
+    for question_id in ids:
+        card = fake.cards[question_id]
+        assert card["archived"] is True and card["collection_id"] == 20
+        expected = [] if provider_returns_empty_arrays else None
+        assert card["parameters"] == card["parameter_mappings"] == expected
+
+
+@pytest.mark.parametrize("root", ["parameters", "parameter_mappings"])
+def test_legacy_null_arrays_batch_rejects_real_parameter_drift(runtime, root):
+    service, fake = runtime
+    for card in fake.cards.values():
+        card.update(parameters=None, parameter_mappings=None)
+    plan = service.action_prepare("question_batch_trash", {"question_ids": [1, 2]})
+    fake.cards[2][root] = [{"id": "new-parameter"}]
+    assert execute(service, plan)["outcome"] == "rejected_stale"
+    assert fake.put_calls == 0
+    assert not any(card["archived"] for card in fake.cards.values())
+
+
 def test_new_protocol_tools_and_actions(runtime, monkeypatch):
     service, _ = runtime
     monkeypatch.setattr(server, "_RUNTIME", service)
