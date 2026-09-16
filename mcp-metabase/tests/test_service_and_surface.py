@@ -483,6 +483,70 @@ def test_stale_object_is_rejected_before_put(runtime) -> None:
     assert fake.put_calls == 0
 
 
+@pytest.mark.parametrize("root", ["name", "description"])
+def test_text_update_preserves_query_refreshed_metadata(runtime, root) -> None:
+    service, fake = runtime
+    fake.cards[1]["result_metadata"] = [{"name": "count", "base_type": "type/Integer"}]
+    plan = service.question_update_prepare(1, [{"op": "set", "path": f"/{root}", "value": "New"}])
+    assert plan["impact"][0]["target"]["query_metadata_independent"] is True
+    refreshed = [{"name": "count", "base_type": "type/Integer", "fingerprint": {"min": 1242}}]
+    fake.cards[1]["result_metadata"] = copy.deepcopy(refreshed)
+    result = _execute(service, plan, Action.QUESTION_UPDATE)
+    assert result["outcome"] == "applied_verified"
+    assert fake.cards[1][root] == "New"
+    assert fake.cards[1]["result_metadata"] == refreshed
+    rollback = service.rollback_prepare(plan["plan_id"])
+    assert _execute(service, rollback, Action.QUESTION_ROLLBACK)["outcome"] == "applied_verified"
+    assert fake.cards[1]["result_metadata"] == refreshed
+
+
+@pytest.mark.parametrize("field,value", [
+    ("name", "Another title"), ("description", "Another description"), ("updated_at", "u1"),
+    ("last-edit-info", {"id": 99}), ("archived", True), ("collection_id", 30),
+    ("dataset_query", {"type": "query", "database": 50, "query": {"limit": 10}}),
+    ("visualization_settings", {"table.columns": [{"name": "other"}]}),
+    ("parameters", [{"id": "different"}]),
+])
+def test_text_update_still_rejects_definition_or_edit_drift(runtime, field, value) -> None:
+    service, fake = runtime
+    plan = service.question_update_prepare(
+        1, [{"op": "set", "path": "/description", "value": "New"}]
+    )
+    fake.cards[1]["result_metadata"] = [{"name": "count", "fingerprint": {"min": 1242}}]
+    fake.cards[1][field] = value
+    assert _execute(service, plan, Action.QUESTION_UPDATE)["outcome"] == "rejected_stale"
+    assert fake.put_calls == 0
+
+
+@pytest.mark.parametrize("operation", [
+    {"op": "set", "path": "/dataset_query/query/limit", "value": 10},
+    {"op": "set", "path": "/visualization_settings/table.cell_column", "value": "count"},
+    {"op": "replace_array", "path": "/result_metadata", "value": [{"name": "new"}]},
+    {"op": "replace_array", "path": "/parameters", "value": [{"id": "new", "type": "category"}]},
+])
+def test_nontext_update_keeps_full_metadata_binding(runtime, operation) -> None:
+    service, fake = runtime
+    plan = service.question_update_prepare(1, [operation])
+    assert "query_metadata_independent" not in plan["impact"][0]["target"]
+    fake.cards[1]["result_metadata"] = [{"name": "count", "fingerprint": {"min": 1242}}]
+    assert _execute(service, plan, Action.QUESTION_UPDATE)["outcome"] == "rejected_stale"
+    assert fake.put_calls == 0
+
+
+def test_query_metadata_drift_with_lost_unapplied_text_update_is_not_applied(runtime, monkeypatch):
+    service, fake = runtime
+    plan = service.question_update_prepare(
+        1, [{"op": "set", "path": "/description", "value": "New"}]
+    )
+    fake.cards[1]["result_metadata"] = [{"name": "count", "fingerprint": {"min": 1242}}]
+
+    def lost_request(path, body):
+        raise MetabaseApiError("response lost", outcome_unknown=True)
+
+    monkeypatch.setattr(fake, "put_json", lost_request)
+    assert _execute(service, plan, Action.QUESTION_UPDATE)["outcome"] == "not_applied_verified"
+
+
 def test_batch_prechecks_every_target_before_first_write(runtime) -> None:
     service, fake = runtime
     plan = service.batch_prepare(

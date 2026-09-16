@@ -2687,6 +2687,10 @@ class MetabaseRuntime:
         )
         if object_type is ObjectType.QUESTION:
             mutation.target["dashboard_count"] = raw.get("dashboard_count")
+            if action is Action.QUESTION_UPDATE and set(mutation.changed_roots) <= {
+                "name", "description"
+            }:
+                mutation.target["query_metadata_independent"] = True
         if object_type is ObjectType.DASHBOARD:
             mutation.target.update(
                 {
@@ -3354,12 +3358,33 @@ class MetabaseRuntime:
             "audit_id": audit_id,
         }
 
+    @staticmethod
+    def _mutation_before_matches(mutation: PlannedMutation, current: dict[str, Any]) -> bool:
+        if object_state_sha256(current, mutation.object_type) == mutation.before_sha256:
+            return True
+        if (
+            mutation.object_type is not ObjectType.QUESTION
+            or not mutation.target.get("query_metadata_independent")
+            or not mutation.before_state
+            or not mutation.changed_roots
+            or not set(mutation.changed_roots) <= {"name", "description"}
+            or not set(mutation.write_payload) <= {"name", "description"}
+        ):
+            return False
+        # Saved queries refresh result metadata without editing the definition.
+        # Text-only PUTs do not send it; keep every other field/timestamp bound.
+        before = {k: v for k, v in mutation.before_state.items() if k != "result_metadata"}
+        observed = {k: v for k, v in current.items() if k != "result_metadata"}
+        return object_state_sha256(before, mutation.object_type) == object_state_sha256(
+            observed, mutation.object_type
+        )
+
     def _mutation_preflight(self, mutation: PlannedMutation) -> tuple[bool, dict[str, Any] | None]:
         if mutation.object_id is None or mutation.before_sha256 is None:
             return False, None
         current_raw = self._object_raw(mutation.object_type, mutation.object_id)
         current = project_state(current_raw, mutation.object_type)
-        if object_state_sha256(current, mutation.object_type) != mutation.before_sha256:
+        if not self._mutation_before_matches(mutation, current):
             return False, current_raw
         expected_inventory = mutation.target.get("inventory")
         if expected_inventory is not None:
@@ -3432,7 +3457,7 @@ class MetabaseRuntime:
                     }
                 outcome = (
                     Outcome.NOT_APPLIED_VERIFIED
-                    if readback_sha256 == mutation.before_sha256
+                    if self._mutation_before_matches(mutation, readback_state)
                     else Outcome.OUTCOME_UNKNOWN
                 )
                 last_result = {
