@@ -82,6 +82,8 @@ COMPACT_MUTATION_ACTIONS = frozenset(
         Action.QUESTION_BATCH_RESTORE,
         Action.DASHBOARD_BATCH_TRASH,
         Action.DASHBOARD_BATCH_RESTORE,
+        Action.COLLECTION_BATCH_TRASH,
+        Action.COLLECTION_BATCH_RESTORE,
         Action.QUESTION_CREATE,
         Action.QUESTION_UPDATE,
         Action.QUESTION_CLONE,
@@ -114,6 +116,11 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.DASHBOARD_BATCH_RESTORE: (
         frozenset({"dashboard_ids"}),
         frozenset({"collection_id", "to_root"}),
+    ),
+    Action.COLLECTION_BATCH_TRASH: (frozenset({"collection_ids"}), frozenset({"empty_only"})),
+    Action.COLLECTION_BATCH_RESTORE: (
+        frozenset({"collection_ids"}),
+        frozenset({"parent_id", "to_root"}),
     ),
     Action.QUESTION_CREATE: (frozenset({"body"}), frozenset()),
     Action.QUESTION_CLONE: (
@@ -171,6 +178,10 @@ COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
     Action.DASHBOARD_BATCH_TRASH: "arguments={dashboard_ids:[positive_integer]}",
     Action.DASHBOARD_BATCH_RESTORE: (
         "arguments={dashboard_ids:[positive_integer],collection_id?,to_root?}"
+    ),
+    Action.COLLECTION_BATCH_TRASH: "arguments={collection_ids:[positive_integer],empty_only?:bool}",
+    Action.COLLECTION_BATCH_RESTORE: (
+        "arguments={collection_ids:[positive_integer],parent_id?,to_root?}"
     ),
     Action.QUESTION_CREATE: (
         "arguments.body={name,dataset_query,display,visualization_settings?,collection_id?,"
@@ -377,6 +388,8 @@ class MetabaseRuntime:
                 "card_notifications": True,
                 "question_batch_lifecycle": True,
                 "dashboard_batch_lifecycle": True,
+                "collection_batch_lifecycle": True,
+                "collection_batch_empty_only": True,
                 "permanent_delete": False,
                 "generic_api": False,
                 "arbitrary_sql": False,
@@ -2626,17 +2639,28 @@ class MetabaseRuntime:
             operations.append(operation)
         return operations
 
-    def _inventory_collection_tree(self, collection_id: int) -> dict[str, Any]:
+    def _inventory_collection_tree(
+        self, collection_id: int, *, strict: bool = False
+    ) -> dict[str, Any]:
         root_id = self._positive_id(collection_id, "collection id")
         pending = [root_id]
         visited: set[int] = set()
         items: list[dict[str, Any]] = []
+        seen_items: set[tuple[str, int]] = set()
         while pending:
             current_id = pending.pop()
             if current_id in visited:
                 raise MutationValidationError("Collection tree contains a repeated collection id.")
             visited.add(current_id)
             collection = self._object_raw(ObjectType.COLLECTION, current_id)
+            if strict and (
+                collection.get("can_write") is not True
+                or collection.get("personal_owner_id") is not None
+                or collection.get("type") in {"trash", "root"}
+            ):
+                raise MutationValidationError(
+                    "Collection tree contains a protected or unwritable root."
+                )
             archived = bool(collection.get("archived"))
             payload = self.http.get_json(
                 self._collection_path(current_id, items=True),
@@ -2647,6 +2671,25 @@ class MetabaseRuntime:
                 },
             )
             direct, total = self._list_payload(payload)
+            # v0.63 returns total=null for a complete empty first page.
+            empty_page = (
+                isinstance(payload, dict)
+                and "total" in payload
+                and payload["total"] is None
+                and not direct
+                and payload.get("offset") == 0
+                and payload.get("limit") == self.config.max_list_items
+            )
+            if strict and (
+                (not empty_page and (total is None or total != len(direct)))
+                or not isinstance(payload, dict)
+                or payload.get("truncated")
+                or payload.get("has_more")
+            ):
+                raise MutationValidationError(
+                    f"Collection batch requires a complete exact inventory; total={total}, "
+                    f"returned={len(direct)}."
+                )
             if len(direct) > self.config.max_list_items or (
                 total is not None and total > len(direct)
             ):
@@ -2660,7 +2703,14 @@ class MetabaseRuntime:
                     raise MutationValidationError(
                         "Collection inventory item has no exact model/id."
                     )
+                if strict and (model, item_id) in seen_items:
+                    raise MutationValidationError("Collection inventory contains duplicate items.")
+                seen_items.add((model, item_id))
                 items.append({"model": model, "id": item_id})
+                if strict and model not in {"collection", "card", "dataset", "metric", "dashboard"}:
+                    raise MutationValidationError(
+                        "Collection batch cannot verify this content model."
+                    )
                 if model == "collection":
                     pending.append(item_id)
                 if len(items) + len(visited) > self.config.max_list_items:
@@ -2674,6 +2724,109 @@ class MetabaseRuntime:
         }
         inventory["sha256"] = canonical_sha256(inventory)
         return inventory
+
+    def collection_batch_lifecycle_prepare(
+        self,
+        collection_ids: list[int],
+        *,
+        restore: bool = False,
+        empty_only: bool = False,
+        parent_id: int | None = None,
+        to_root: bool = False,
+    ) -> dict[str, Any]:
+        context = self._write_context()
+        # Non-admin listings may silently omit inaccessible descendants.
+        if context["user"].get("is_superuser") is not True:
+            raise MetabasePolicyError(
+                "Collection batch requires a verified superuser for complete trees."
+            )
+        if (
+            not isinstance(collection_ids, list)
+            or not 1 <= len(collection_ids) <= self.config.max_batch_items
+        ):
+            raise MutationValidationError(
+                "Collection inventory exceeds the configured batch bound."
+            )
+        ids = [self._positive_id(value, "collection_id") for value in collection_ids]
+        if len(set(ids)) != len(ids):
+            raise MutationValidationError("Collection inventory contains duplicate ids.")
+        if type(empty_only) is not bool or type(to_root) is not bool:
+            raise MutationValidationError("empty_only and to_root must be booleans.")
+        if (restore and empty_only) or (not restore and (parent_id is not None or to_root)):
+            raise MutationValidationError(
+                "empty_only is trash-only; destinations are restore-only."
+            )
+        if parent_id is not None:
+            self._positive_id(parent_id, "parent_id")
+        if parent_id is not None and to_root:
+            raise MutationValidationError("Restore destination must be one parent or root.")
+        raw_objects, inventories = {}, {}
+        for cid in ids:
+            raw = self._object_raw(ObjectType.COLLECTION, cid)
+            if raw.get("archived") is not restore:
+                raise MutationValidationError(
+                    "Every collection must be in the expected initial state."
+                )
+            inventory = self._inventory_collection_tree(cid, strict=True)
+            if empty_only and any(item["model"] != "collection" for item in inventory["items"]):
+                raise MutationValidationError(
+                    f"Collection {cid} has active content; empty_only rejected."
+                )
+            raw_objects[cid], inventories[cid] = raw, inventory
+        covered = {
+            child
+            for cid, inv in inventories.items()
+            for child in inv["collections"]
+            if child != cid
+        }
+        effective = [cid for cid in ids if cid not in covered]
+        if not effective:
+            raise MutationValidationError("Collection inventory has no independent roots.")
+        tree_ids: set[int] = set()
+        mutations = []
+        for cid in effective:
+            inventory = inventories[cid]
+            if tree_ids.intersection(inventory["collections"]):
+                raise MutationValidationError("Collection trees overlap inconsistently.")
+            tree_ids.update(inventory["collections"])
+            operations = [PatchOperation(op="set", path="/archived", value=not restore)]
+            if restore and (parent_id is not None or to_root):
+                operations.append(PatchOperation(op="set", path="/parent_id", value=parent_id))
+            mutation = self._build_runtime_mutation(
+                object_type=ObjectType.COLLECTION,
+                raw_before=raw_objects[cid],
+                operations=operations,
+            )
+            mutation.target.update(
+                {
+                    "name": raw_objects[cid].get("name"),
+                    "inventory": inventory,
+                    "strict_collection_inventory": True,
+                    "empty_only": empty_only,
+                    "covered_requested_ids": [
+                        value for value in ids if value in inventory["collections"]
+                    ],
+                    "side_effects": (
+                        "Provider cascades to the bound tree; "
+                        "restore does not resume subscriptions."
+                    ),
+                }
+            )
+            mutations.append(mutation)
+        if parent_id in tree_ids:
+            raise MutationValidationError("Restore destination cannot be inside a selected tree.")
+        return self._prepare_plan(
+            context=context,
+            action=Action.COLLECTION_BATCH_RESTORE if restore else Action.COLLECTION_BATCH_TRASH,
+            mutations=mutations,
+            arguments={
+                "collection_ids": effective,
+                "requested_collection_ids": ids,
+                "empty_only": empty_only,
+                "parent_id": parent_id,
+                "to_root": to_root,
+            },
+        )
 
     def _update_prepare(
         self,
@@ -3247,6 +3400,14 @@ class MetabaseRuntime:
             result = self.collection_update_prepare(
                 arguments["collection_id"], arguments["operations"]
             )
+        elif selected in {Action.COLLECTION_BATCH_TRASH, Action.COLLECTION_BATCH_RESTORE}:
+            result = self.collection_batch_lifecycle_prepare(
+                arguments["collection_ids"],
+                restore=selected is Action.COLLECTION_BATCH_RESTORE,
+                empty_only=arguments.get("empty_only", False),
+                parent_id=arguments.get("parent_id"),
+                to_root=arguments.get("to_root", False),
+            )
         elif selected is Action.COLLECTION_TRASH:
             result = self.collection_trash_prepare(arguments["collection_id"])
         elif selected is Action.COLLECTION_RESTORE:
@@ -3293,6 +3454,8 @@ class MetabaseRuntime:
             Action.QUESTION_BATCH_RESTORE,
             Action.DASHBOARD_BATCH_TRASH,
             Action.DASHBOARD_BATCH_RESTORE,
+            Action.COLLECTION_BATCH_TRASH,
+            Action.COLLECTION_BATCH_RESTORE,
             Action.NOTIFICATION_UPDATE,
             Action.NOTIFICATION_CREATE,
             Action.QUESTION_TRASH,
@@ -3442,7 +3605,11 @@ class MetabaseRuntime:
     ) -> dict[str, Any]:
         if current_raw is None or mutation.before_state is None:
             return {"comparison_available": False}
-        current = project_state(current_raw, mutation.object_type)
+        inventory_drift = current_raw.get("_mcp_inventory_drift")
+        current = project_state(
+            {k: v for k, v in current_raw.items() if k != "_mcp_inventory_drift"},
+            mutation.object_type,
+        )
         before = mutation.before_state
         changed = [
             root
@@ -3460,6 +3627,7 @@ class MetabaseRuntime:
             "truncated": len(changed) > 32,
             "before_sha256": mutation.before_sha256,
             "observed_sha256": object_state_sha256(current, mutation.object_type),
+            **({"inventory_drift": inventory_drift} if inventory_drift else {}),
         }
 
     def _mutation_preflight(self, mutation: PlannedMutation) -> tuple[bool, dict[str, Any] | None]:
@@ -3473,9 +3641,17 @@ class MetabaseRuntime:
         if expected_inventory is not None:
             if mutation.object_type is not ObjectType.COLLECTION:
                 raise MetabasePolicyError("Collection inventory was bound to a non-collection.")
-            current_inventory = self._inventory_collection_tree(mutation.object_id)
+            current_inventory = self._inventory_collection_tree(
+                mutation.object_id, strict=bool(mutation.target.get("strict_collection_inventory"))
+            )
             if canonical_sha256(current_inventory) != canonical_sha256(expected_inventory):
-                return False, current_raw
+                return False, {
+                    **current_raw,
+                    "_mcp_inventory_drift": {
+                        "before_sha256": expected_inventory["sha256"],
+                        "observed_sha256": current_inventory["sha256"],
+                    },
+                }
         return True, current_raw
 
     @staticmethod
@@ -3493,6 +3669,22 @@ class MetabaseRuntime:
         if prefix is None:
             raise MutationValidationError("Metabase object type has no update endpoint.")
         return f"/api/{prefix}/{mutation.object_id}"
+
+    def _collection_cascade_readback(self, mutation: PlannedMutation) -> dict[str, Any]:
+        results = []
+        for item in mutation.target["inventory"]["items"]:
+            kind = {"collection": ObjectType.COLLECTION, "dashboard": ObjectType.DASHBOARD}.get(
+                item["model"], ObjectType.QUESTION
+            )
+            try:
+                raw = self._object_raw(kind, item["id"])
+                matches = raw.get("archived") is mutation.after_state["archived"]
+            except (MetabaseApiError, MutationValidationError):
+                matches = False
+            results.append(
+                {"object_type": kind.value, "object_id": item["id"], "verified": matches}
+            )
+        return {"verified": all(item["verified"] for item in results), "objects": results}
 
     def _reconcile_update(
         self,
@@ -3527,7 +3719,13 @@ class MetabaseRuntime:
                 }
             else:
                 readback_sha256 = object_state_sha256(readback_state, mutation.object_type)
-                if verify_mutation(mutation, readback):
+                root_verified = verify_mutation(mutation, readback)
+                cascade = (
+                    self._collection_cascade_readback(mutation)
+                    if root_verified and mutation.target.get("strict_collection_inventory")
+                    else None
+                )
+                if root_verified and (cascade is None or cascade["verified"]):
                     mutation.verified_after_state = readback_state
                     mutation.verified_after_sha256 = readback_sha256
                     return {
@@ -3537,6 +3735,7 @@ class MetabaseRuntime:
                         "http_status": request_error.status_code if request_error else None,
                         "verified_after_sha256": readback_sha256,
                         "reconciliation_attempts": attempt,
+                        **({"cascade_readback": cascade} if cascade is not None else {}),
                     }
                 outcome = (
                     Outcome.NOT_APPLIED_VERIFIED
@@ -3550,6 +3749,7 @@ class MetabaseRuntime:
                     "http_status": request_error.status_code if request_error else None,
                     "verified_after_sha256": readback_sha256,
                     "reconciliation_attempts": attempt,
+                    **({"cascade_readback": cascade} if cascade is not None else {}),
                 }
             if attempt < MUTATION_RECONCILIATION_ATTEMPTS:
                 time.sleep(MUTATION_RECONCILIATION_DELAY_SECONDS)
@@ -3753,7 +3953,16 @@ class MetabaseRuntime:
 
     def _execute_batch(self, plan: ExactPlan) -> tuple[Outcome, dict[str, Any]]:
         for index, mutation in enumerate(plan.mutations):
-            fresh, current_raw = self._mutation_preflight(mutation)
+            try:
+                fresh, current_raw = self._mutation_preflight(mutation)
+            except (MetabaseApiError, MutationValidationError, MetabasePolicyError):
+                return Outcome.NOT_APPLIED_VERIFIED, {
+                    "reason": "preflight_read_failed_before_write",
+                    "failed_index": index,
+                    "object_results": [],
+                    "applied_indexes": [],
+                    "rollback_candidates": [],
+                }
             if not fresh:
                 return Outcome.REJECTED_STALE, {
                     "object_results": [
@@ -3775,7 +3984,20 @@ class MetabaseRuntime:
         write_attempted_indexes: set[int] = set()
         terminal_failure: Outcome | None = None
         for index, mutation in enumerate(plan.mutations):
-            fresh, current_raw = self._mutation_preflight(mutation)
+            try:
+                fresh, current_raw = self._mutation_preflight(mutation)
+            except (MetabaseApiError, MutationValidationError, MetabasePolicyError):
+                object_results.append(
+                    {
+                        "object_type": mutation.object_type.value,
+                        "object_id": mutation.object_id,
+                        "outcome": Outcome.NOT_APPLIED_VERIFIED.value,
+                        "index": index,
+                        "reason": "preflight_read_failed_before_write",
+                    }
+                )
+                terminal_failure = Outcome.NOT_APPLIED_VERIFIED
+                break
             if not fresh:
                 object_results.append(
                     {
@@ -4377,6 +4599,11 @@ class MetabaseRuntime:
             Action.COLLECTION_CLONE,
         }
         try:
+            if (
+                any(m.target.get("strict_collection_inventory") for m in plan.mutations)
+                and context["user"].get("is_superuser") is not True
+            ):
+                raise MetabasePolicyError("Collection batch requires complete admin visibility.")
             if plan.action in update_actions:
                 outcome, details = self._execute_single_update(plan.mutations[0])
             elif plan.action in {
@@ -4386,6 +4613,8 @@ class MetabaseRuntime:
                 Action.QUESTION_BATCH_RESTORE,
                 Action.DASHBOARD_BATCH_TRASH,
                 Action.DASHBOARD_BATCH_RESTORE,
+                Action.COLLECTION_BATCH_TRASH,
+                Action.COLLECTION_BATCH_RESTORE,
             }:
                 outcome, details = self._execute_batch(plan)
             elif plan.action is Action.DASHBOARD_CREATE:
@@ -4486,7 +4715,12 @@ class MetabaseRuntime:
             if mutation.object_type is ObjectType.COLLECTION and (
                 "archived" in mutation.changed_roots or "parent_id" in mutation.changed_roots
             ):
-                mutation.target["inventory"] = self._inventory_collection_tree(mutation.object_id)
+                strict = bool(source_mutation.target.get("strict_collection_inventory"))
+                mutation.target["inventory"] = self._inventory_collection_tree(
+                    mutation.object_id, strict=strict
+                )
+                if strict:
+                    mutation.target["strict_collection_inventory"] = True
             mutations.append(mutation)
 
         rollback_actions = {

@@ -1156,7 +1156,11 @@ def rollback_mutation(source: PlannedMutation, current_raw: dict[str, Any]) -> P
         source.changed_roots,
     )
     if source.object_type is ObjectType.COLLECTION:
-        payload["archived"] = bool(current.get("archived", False))
+        payload["archived"] = bool(
+            source.before_state.get("archived", False)
+            if "archived" in source.changed_roots
+            else current.get("archived", False)
+        )
     return PlannedMutation(
         object_type=source.object_type,
         object_id=source.object_id,

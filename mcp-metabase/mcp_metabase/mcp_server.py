@@ -25,6 +25,8 @@ CompactActionName = Literal[
     "question_batch_restore",
     "dashboard_batch_trash",
     "dashboard_batch_restore",
+    "collection_batch_trash",
+    "collection_batch_restore",
     "question_create",
     "question_copy",
     "question_update",
@@ -759,6 +761,9 @@ def metabase_action_prepare(
     question_batch_trash: {question_ids:[id,...]}; question_batch_restore adds optional
     collection_id or to_root. Bounded exact inventory, per-object reconciliation.
     dashboard_batch_trash/dashboard_batch_restore use dashboard_ids with the same bound.
+    collection_batch_trash: {collection_ids:[id,...],empty_only?:bool}; restore adds
+    parent_id or to_root instead of empty_only. Exact complete trees; overlaps collapse
+    to their selected ancestor. Batch collections require a verified superuser.
     Other updates use id+operations; lifecycle is excluded from generic patches.
     """
     return _call("action_prepare", action, arguments)

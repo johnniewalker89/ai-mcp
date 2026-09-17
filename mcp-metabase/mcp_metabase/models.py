@@ -26,6 +26,8 @@ class Action(StrEnum):
     QUESTION_BATCH_RESTORE = "question_batch_restore"
     DASHBOARD_BATCH_TRASH = "dashboard_batch_trash"
     DASHBOARD_BATCH_RESTORE = "dashboard_batch_restore"
+    COLLECTION_BATCH_TRASH = "collection_batch_trash"
+    COLLECTION_BATCH_RESTORE = "collection_batch_restore"
     QUESTION_CREATE = "question_create"
     QUESTION_UPDATE = "question_update"
     QUESTION_CLONE = "question_clone"
