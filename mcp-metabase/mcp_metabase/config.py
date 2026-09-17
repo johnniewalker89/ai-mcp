@@ -74,7 +74,7 @@ class MetabaseConfig:
     default_query_rows: int = 100
     max_query_rows: int = 200
     max_list_items: int = 200
-    max_batch_items: int = 50
+    max_batch_items: int = 100
     plan_ttl_seconds: int = 300
     max_active_plans: int = 100
     max_plan_bytes: int = 8_000_000
@@ -170,7 +170,7 @@ class MetabaseConfig:
             default_query_rows=default_rows,
             max_query_rows=max_rows,
             max_list_items=_positive_int("METABASE_MCP_MAX_LIST_ITEMS", 200, 1, 500),
-            max_batch_items=_positive_int("METABASE_MCP_MAX_BATCH_ITEMS", 50, 1, 100),
+            max_batch_items=_positive_int("METABASE_MCP_MAX_BATCH_ITEMS", 100, 1, 100),
             plan_ttl_seconds=_positive_int("METABASE_MCP_PLAN_TTL_SECONDS", 300, 30, 900),
             max_active_plans=_positive_int("METABASE_MCP_MAX_ACTIVE_PLANS", 100, 1, 1_000),
             max_plan_bytes=_positive_int(

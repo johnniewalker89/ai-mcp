@@ -193,13 +193,40 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _strip_mbql_field_uuids(value: Any) -> None:
+    """Drop generated field-clause IDs, preserving IDs on stages/joins/other clauses."""
+    if isinstance(value, list):
+        if value and value[0] == "value":
+            return  # Literal data is not a query AST.
+        if len(value) == 3 and value[0] == "field" and isinstance(value[1], dict):
+            value[1].pop("lib/uuid", None)
+        for item in value:
+            _strip_mbql_field_uuids(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _strip_mbql_field_uuids(item)
+
+
 def _native_field_filter_comparison(value: Any) -> Any:
-    """Ignore provider-managed annotations on native template-tag field references."""
+    """Compare query field references without provider-generated annotations."""
     result = copy.deepcopy(value)
     if not isinstance(result, dict):
         return result
     if result.get("lib/type") == "mbql/query":
         stages = result.get("stages")
+        for stage in stages if isinstance(stages, list) else []:
+            if not isinstance(stage, dict) or stage.get("lib/type") != "mbql.stage/mbql":
+                continue
+            for root in (
+                "fields",
+                "filters",
+                "aggregation",
+                "breakout",
+                "order-by",
+                "expressions",
+                "joins",
+            ):
+                _strip_mbql_field_uuids(stage.get(root))
         containers = (
             [
                 stage
@@ -238,7 +265,7 @@ def _native_field_filter_comparison(value: Any) -> Any:
 
 
 def object_state_sha256(state: dict[str, Any], object_type: ObjectType) -> str:
-    """Hash state without provider-managed native field-filter annotations."""
+    """Hash state without provider-managed query field-reference annotations."""
     comparison = copy.deepcopy(state)
     if object_type is ObjectType.QUESTION and "dataset_query" in comparison:
         comparison["dataset_query"] = _native_field_filter_comparison(comparison["dataset_query"])

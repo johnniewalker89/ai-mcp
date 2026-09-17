@@ -3380,6 +3380,32 @@ class MetabaseRuntime:
             observed, mutation.object_type
         )
 
+    @staticmethod
+    def _stale_diagnostic(
+        mutation: PlannedMutation, current_raw: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        if current_raw is None or mutation.before_state is None:
+            return {"comparison_available": False}
+        current = project_state(current_raw, mutation.object_type)
+        before = mutation.before_state
+        changed = [
+            root
+            for root in sorted(set(before) | set(current))
+            if object_state_sha256(
+                {root: before[root]} if root in before else {}, mutation.object_type
+            )
+            != object_state_sha256(
+                {root: current[root]} if root in current else {}, mutation.object_type
+            )
+        ]
+        return {
+            "comparison_available": True,
+            "changed_roots": changed[:32],
+            "truncated": len(changed) > 32,
+            "before_sha256": mutation.before_sha256,
+            "observed_sha256": object_state_sha256(current, mutation.object_type),
+        }
+
     def _mutation_preflight(self, mutation: PlannedMutation) -> tuple[bool, dict[str, Any] | None]:
         if mutation.object_id is None or mutation.before_sha256 is None:
             return False, None
@@ -3671,7 +3697,7 @@ class MetabaseRuntime:
 
     def _execute_batch(self, plan: ExactPlan) -> tuple[Outcome, dict[str, Any]]:
         for index, mutation in enumerate(plan.mutations):
-            fresh, _ = self._mutation_preflight(mutation)
+            fresh, current_raw = self._mutation_preflight(mutation)
             if not fresh:
                 return Outcome.REJECTED_STALE, {
                     "object_results": [
@@ -3679,6 +3705,7 @@ class MetabaseRuntime:
                             "object_type": mutation.object_type.value,
                             "object_id": mutation.object_id,
                             "outcome": Outcome.REJECTED_STALE.value,
+                            "stale_diagnostic": self._stale_diagnostic(mutation, current_raw),
                             "index": index,
                         }
                     ],
@@ -3692,13 +3719,14 @@ class MetabaseRuntime:
         write_attempted_indexes: set[int] = set()
         terminal_failure: Outcome | None = None
         for index, mutation in enumerate(plan.mutations):
-            fresh, _ = self._mutation_preflight(mutation)
+            fresh, current_raw = self._mutation_preflight(mutation)
             if not fresh:
                 object_results.append(
                     {
                         "object_type": mutation.object_type.value,
                         "object_id": mutation.object_id,
                         "outcome": Outcome.REJECTED_STALE.value,
+                        "stale_diagnostic": self._stale_diagnostic(mutation, current_raw),
                         "index": index,
                     }
                 )

@@ -215,8 +215,17 @@ Channel credentials, hydrated cards/users и неизвестные blobs не �
   инстанса, отдельного поля timezone в этом API нет.
 - `question_batch_trash`: `arguments={question_ids:[...]}`;
   `question_batch_restore`: тот же список плюс optional `collection_id` или
-  `to_root=true`. Размер ограничен `max_batch_items`; пустой/повторный inventory
+  `to_root=true`. Размер ограничен `max_batch_items` (по умолчанию 100;
+  `METABASE_MCP_MAX_BATCH_ITEMS` позволяет установить 1–100); пустой/повторный inventory
   и неверное исходное archived-состояние отклоняются. Список проверяется до записи.
+
+Сравнение question state игнорирует только генерируемый `lib/uuid` в field-clause
+options MBQL, как и служебные аннотации native field filters. IDs полей, типы,
+alias, query/parameters/visualization, timestamps и прочие данные остаются bound;
+исходные payload не переписываются. Batch `rejected_stale` содержит
+`object_results[].stale_diagnostic`: ограниченные `changed_roots` и hashes до/после,
+без значений полей или SQL. Реальные изменения останавливают пакет; до новой
+подготовки нужно сверить актуальный состав, не повторять уже применённые элементы.
 
 Update сохраняет неизвестные persisted поля и ID вложенных subscriptions,
 handlers и recipients; не заменяет notification неполным payload. Получателя

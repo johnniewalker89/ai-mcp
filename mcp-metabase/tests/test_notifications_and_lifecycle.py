@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from dataclasses import replace
 
 import pytest
 from fastmcp import Client
@@ -10,8 +11,12 @@ from test_service_and_surface import StatefulApi
 
 import mcp_metabase.mcp_server as server
 from mcp_metabase.http_client import MetabaseApiError
-from mcp_metabase.models import Action
-from mcp_metabase.normalization import MutationValidationError
+from mcp_metabase.models import Action, ObjectType
+from mcp_metabase.normalization import (
+    MutationValidationError,
+    dataset_query_semantically_matches,
+    object_state_sha256,
+)
 from mcp_metabase.notifications import NotificationShapeError, notification_state
 from mcp_metabase.service import MetabaseRuntime
 
@@ -298,6 +303,160 @@ def test_batch_all_inventory_stale_preflight_no_partial_write(runtime):
     fake.cards[2]["name"] = "Changed"
     assert execute(service, plan)["outcome"] == "rejected_stale"
     assert fake.put_calls == 0
+
+
+def mbql_query():
+    return {
+        "lib/type": "mbql/query",
+        "database": 50,
+        "stages": [
+            {
+                "lib/type": "mbql.stage/mbql",
+                "source-table": 100,
+                "fields": [["field", {"lib/uuid": "generated", "base-type": "type/Integer"}, 101]],
+            }
+        ],
+    }
+
+
+def install_volatile_mbql(fake, monkeypatch):
+    for card in fake.cards.values():
+        card["dataset_query"] = mbql_query()
+    original = fake.get_json
+    count = 0
+
+    def get_json(path, *, params=None):
+        nonlocal count
+        result = original(path, params=params)
+        if path.startswith("/api/card/"):
+            count += 1
+            result["dataset_query"]["stages"][0]["fields"][0][1]["lib/uuid"] = f"read-{count}"
+        return result
+
+    monkeypatch.setattr(fake, "get_json", get_json)
+
+
+def test_batch_mbql_generated_field_uuid_trash_restore_and_rollback(runtime, monkeypatch):
+    service, fake = runtime
+    install_volatile_mbql(fake, monkeypatch)
+    before = copy.deepcopy(fake.cards)
+    trash = service.action_prepare("question_batch_trash", {"question_ids": [1, 2]})
+    assert execute(service, trash)["outcome"] == "applied_verified"
+    restore = service.action_prepare(
+        "question_batch_restore", {"question_ids": [1, 2], "collection_id": 30}
+    )
+    assert execute(service, restore)["outcome"] == "applied_verified"
+    rollback = service.rollback_prepare(restore["plan_id"])
+    assert (
+        service.exact_action_execute(
+            rollback["plan_id"], rollback["digest"], expected_actions={Action.BATCH_ROLLBACK}
+        )["outcome"]
+        == "applied_verified"
+    )
+    assert all(card["archived"] for card in fake.cards.values())
+    assert all(fake.cards[i]["dataset_query"] == before[i]["dataset_query"] for i in [1, 2])
+
+
+@pytest.mark.parametrize(
+    "root,value",
+    [
+        ("description", "a real edit"),
+        ("collection_id", 30),
+        ("updated_at", "u1"),
+        ("parameters", [{"id": "new", "type": "category"}]),
+        ("result_metadata", [{"name": "fresh"}]),
+    ],
+)
+def test_batch_real_drift_is_diagnosed_without_values(runtime, monkeypatch, root, value):
+    service, fake = runtime
+    install_volatile_mbql(fake, monkeypatch)
+    plan = service.action_prepare("question_batch_trash", {"question_ids": [1, 2]})
+    fake.cards[2][root] = value
+    result = execute(service, plan)
+    assert result["outcome"] == "rejected_stale"
+    diagnostic = result["object_results"][0]["stale_diagnostic"]
+    assert diagnostic["changed_roots"] == [root]
+    assert diagnostic["comparison_available"] and not diagnostic["truncated"]
+    assert "a real edit" not in json.dumps(diagnostic)
+    assert fake.put_calls == 0
+
+
+def test_batch_second_preflight_diagnoses_concurrent_edit_after_first_write(runtime, monkeypatch):
+    service, fake = runtime
+    install_volatile_mbql(fake, monkeypatch)
+    original_put = fake.put_json
+
+    def put(path, body):
+        result = original_put(path, body)
+        fake.cards[2]["description"] = "concurrent edit"
+        return result
+
+    monkeypatch.setattr(fake, "put_json", put)
+    plan = service.action_prepare("question_batch_trash", {"question_ids": [1, 2]})
+    result = execute(service, plan)
+    assert result["outcome"] == "partially_applied"
+    assert result["applied_indexes"] == [0] and fake.put_calls == 1
+    assert result["object_results"][1]["stale_diagnostic"]["changed_roots"] == ["description"]
+    assert not fake.cards[2]["archived"]
+
+
+@pytest.mark.parametrize("change", ["field_id", "alias", "type", "source", "stage_uuid"])
+def test_mbql_field_uuid_normalization_preserves_semantic_changes(change):
+    before = mbql_query()
+    after = copy.deepcopy(before)
+    after["stages"][0]["fields"][0][1]["lib/uuid"] = "other"
+    assert dataset_query_semantically_matches(before, after)
+    stage = after["stages"][0]
+    if change == "field_id":
+        stage["fields"][0][2] = 102
+    elif change == "alias":
+        stage["fields"][0][1]["join-alias"] = "other"
+    elif change == "type":
+        stage["fields"][0][1]["base-type"] = "type/Text"
+    elif change == "source":
+        stage["source-table"] = 200
+    else:
+        stage["lib/uuid"] = "stage-identity"
+    assert not dataset_query_semantically_matches(before, after)
+
+
+def test_mbql_literal_and_unknown_query_uuid_remain_bound():
+    before = mbql_query()
+    before["stages"][0]["filters"] = [["value", {}, ["field", {"lib/uuid": "literal"}, 101]]]
+    after = copy.deepcopy(before)
+    after["stages"][0]["filters"][0][2][1]["lib/uuid"] = "changed literal"
+    assert not dataset_query_semantically_matches(before, after)
+    before["lib/type"] = after["lib/type"] = "unknown/query"
+    after = copy.deepcopy(before)
+    after["stages"][0]["fields"][0][1]["lib/uuid"] = "unknown contract"
+    assert not dataset_query_semantically_matches(before, after)
+
+
+def test_mbql_dashboard_embedded_binding_ignores_only_field_uuid():
+    before = {"id": 10, "dashcards": [{"id": 1, "card": {"dataset_query": mbql_query()}}]}
+    after = copy.deepcopy(before)
+    after["dashcards"][0]["card"]["dataset_query"]["stages"][0]["fields"][0][1]["lib/uuid"] = (
+        "fresh"
+    )
+    assert object_state_sha256(before, ObjectType.DASHBOARD) == object_state_sha256(
+        after, ObjectType.DASHBOARD
+    )
+    assert before != after  # Comparison must never rewrite the raw payload.
+
+
+def test_batch_one_hundred_supported_and_one_hundred_one_rejected(runtime, monkeypatch):
+    service, fake = runtime
+    service.config = replace(service.config, max_batch_items=100)
+    fake.cards = {i: {**copy.deepcopy(fake.cards[1]), "id": i} for i in range(1, 102)}
+    install_volatile_mbql(fake, monkeypatch)
+    with pytest.raises(MutationValidationError):
+        service.action_prepare("question_batch_trash", {"question_ids": list(range(1, 102))})
+    assert fake.put_calls == 0
+    plan = service.action_prepare("question_batch_trash", {"question_ids": list(range(1, 101))})
+    result = execute(service, plan)
+    assert result["outcome"] == "applied_verified"
+    assert len(result["applied_indexes"]) == 100 and fake.put_calls == 100
+    assert not fake.cards[101]["archived"]
 
 
 @pytest.mark.parametrize("batch", [False, True])
