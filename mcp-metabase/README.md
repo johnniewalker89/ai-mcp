@@ -218,6 +218,13 @@ Channel credentials, hydrated cards/users и неизвестные blobs не �
   `to_root=true`. Размер ограничен `max_batch_items` (по умолчанию 100;
   `METABASE_MCP_MAX_BATCH_ITEMS` позволяет установить 1–100); пустой/повторный inventory
   и неверное исходное archived-состояние отклоняются. Список проверяется до записи.
+- `dashboard_batch_trash`: `arguments={dashboard_ids:[...]}`;
+  `dashboard_batch_restore`: тот же список плюс optional `collection_id` или
+  `to_root=true`. Те же лимит 100, проверка каждого объекта, частичный результат,
+  readback/recovery без повторной записи и rollback применённых элементов.
+  Переносятся сами дашборды; связанные карточки не архивируются. Layout, tabs и
+  параметры сохраняются. Восстановление не возобновляет подписки, отключённые
+  провайдером при архивировании. Generic `batch` по-прежнему запрещает `/archived`.
 
 Сравнение question state игнорирует генерируемый `lib/uuid` в options MBQL clauses
 (поля, агрегаты, фильтры, выражения, сортировка), как и служебные аннотации native

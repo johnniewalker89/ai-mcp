@@ -23,6 +23,8 @@ CompactActionName = Literal[
     "notification_create",
     "question_batch_trash",
     "question_batch_restore",
+    "dashboard_batch_trash",
+    "dashboard_batch_restore",
     "question_create",
     "question_copy",
     "question_update",
@@ -756,6 +758,7 @@ def metabase_action_prepare(
     may cause subscription emails and scheduled delivery.
     question_batch_trash: {question_ids:[id,...]}; question_batch_restore adds optional
     collection_id or to_root. Bounded exact inventory, per-object reconciliation.
+    dashboard_batch_trash/dashboard_batch_restore use dashboard_ids with the same bound.
     Other updates use id+operations; lifecycle is excluded from generic patches.
     """
     return _call("action_prepare", action, arguments)

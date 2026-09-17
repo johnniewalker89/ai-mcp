@@ -24,6 +24,8 @@ class Action(StrEnum):
     NOTIFICATION_ROLLBACK = "notification_rollback"
     QUESTION_BATCH_TRASH = "question_batch_trash"
     QUESTION_BATCH_RESTORE = "question_batch_restore"
+    DASHBOARD_BATCH_TRASH = "dashboard_batch_trash"
+    DASHBOARD_BATCH_RESTORE = "dashboard_batch_restore"
     QUESTION_CREATE = "question_create"
     QUESTION_UPDATE = "question_update"
     QUESTION_CLONE = "question_clone"

@@ -80,6 +80,8 @@ COMPACT_MUTATION_ACTIONS = frozenset(
         Action.NOTIFICATION_CREATE,
         Action.QUESTION_BATCH_TRASH,
         Action.QUESTION_BATCH_RESTORE,
+        Action.DASHBOARD_BATCH_TRASH,
+        Action.DASHBOARD_BATCH_RESTORE,
         Action.QUESTION_CREATE,
         Action.QUESTION_UPDATE,
         Action.QUESTION_CLONE,
@@ -106,6 +108,11 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.QUESTION_BATCH_TRASH: (frozenset({"question_ids"}), frozenset()),
     Action.QUESTION_BATCH_RESTORE: (
         frozenset({"question_ids"}),
+        frozenset({"collection_id", "to_root"}),
+    ),
+    Action.DASHBOARD_BATCH_TRASH: (frozenset({"dashboard_ids"}), frozenset()),
+    Action.DASHBOARD_BATCH_RESTORE: (
+        frozenset({"dashboard_ids"}),
         frozenset({"collection_id", "to_root"}),
     ),
     Action.QUESTION_CREATE: (frozenset({"body"}), frozenset()),
@@ -160,6 +167,10 @@ COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
     Action.QUESTION_BATCH_TRASH: "arguments={question_ids:[positive_integer]}",
     Action.QUESTION_BATCH_RESTORE: (
         "arguments={question_ids:[positive_integer],collection_id?,to_root?}"
+    ),
+    Action.DASHBOARD_BATCH_TRASH: "arguments={dashboard_ids:[positive_integer]}",
+    Action.DASHBOARD_BATCH_RESTORE: (
+        "arguments={dashboard_ids:[positive_integer],collection_id?,to_root?}"
     ),
     Action.QUESTION_CREATE: (
         "arguments.body={name,dataset_query,display,visualization_settings?,collection_id?,"
@@ -365,6 +376,7 @@ class MetabaseRuntime:
                 "public_tool_count": 15,
                 "card_notifications": True,
                 "question_batch_lifecycle": True,
+                "dashboard_batch_lifecycle": True,
                 "permanent_delete": False,
                 "generic_api": False,
                 "arbitrary_sql": False,
@@ -2995,15 +3007,50 @@ class MetabaseRuntime:
         collection_id: int | None = None,
         to_root: bool = False,
     ) -> dict[str, Any]:
+        return self._batch_lifecycle_prepare(
+            ObjectType.QUESTION,
+            question_ids,
+            restore=restore,
+            collection_id=collection_id,
+            to_root=to_root,
+        )
+
+    def dashboard_batch_lifecycle_prepare(
+        self,
+        dashboard_ids: list[int],
+        *,
+        restore: bool = False,
+        collection_id: int | None = None,
+        to_root: bool = False,
+    ) -> dict[str, Any]:
+        return self._batch_lifecycle_prepare(
+            ObjectType.DASHBOARD,
+            dashboard_ids,
+            restore=restore,
+            collection_id=collection_id,
+            to_root=to_root,
+        )
+
+    def _batch_lifecycle_prepare(
+        self,
+        object_type: ObjectType,
+        object_ids: list[int],
+        *,
+        restore: bool = False,
+        collection_id: int | None = None,
+        to_root: bool = False,
+    ) -> dict[str, Any]:
+        if object_type not in {ObjectType.QUESTION, ObjectType.DASHBOARD}:
+            raise MutationValidationError("Lifecycle batch supports questions or dashboards only.")
         context = self._write_context()
         if (
-            not isinstance(question_ids, list)
-            or not 1 <= len(question_ids) <= self.config.max_batch_items
+            not isinstance(object_ids, list)
+            or not 1 <= len(object_ids) <= self.config.max_batch_items
         ):
             raise MutationValidationError("Lifecycle inventory exceeds the configured batch bound.")
-        ids = [self._positive_id(value, "question_id") for value in question_ids]
+        ids = [self._positive_id(value, f"{object_type.value}_id") for value in object_ids]
         if len(set(ids)) != len(ids):
-            raise MutationValidationError("Lifecycle inventory contains duplicate question ids.")
+            raise MutationValidationError("Lifecycle inventory contains duplicate object ids.")
         if type(to_root) is not bool or (to_root and collection_id is not None):
             raise MutationValidationError("Restore destination must be one collection or root.")
         if not restore and (collection_id is not None or to_root):
@@ -3011,8 +3058,8 @@ class MetabaseRuntime:
         if collection_id is not None:
             self._positive_id(collection_id, "collection_id")
         mutations = []
-        for question_id in ids:
-            raw = self._object_raw(ObjectType.QUESTION, question_id)
+        for object_id in ids:
+            raw = self._object_raw(object_type, object_id)
             if raw.get("archived") is not restore:
                 raise MutationValidationError(
                     "Every lifecycle target must be in the expected initial state."
@@ -3023,7 +3070,7 @@ class MetabaseRuntime:
                     PatchOperation(op="set", path="/collection_id", value=collection_id)
                 )
             mutation = self._build_runtime_mutation(
-                object_type=ObjectType.QUESTION,
+                object_type=object_type,
                 raw_before=raw,
                 operations=operations,
             )
@@ -3033,18 +3080,18 @@ class MetabaseRuntime:
                     "original_collection_id": raw.get("collection_id"),
                     "dashboard_count": raw.get("dashboard_count"),
                     "side_effects": (
-                        "Provider archive may disable dependent notifications. "
-                        "Restore/rollback restores card state, not those side effects."
+                        "Provider archive may disable dependent notifications/subscriptions. "
+                        "Restore/rollback restores object state, not those side effects."
                     ),
                 }
             )
             mutations.append(mutation)
         return self._prepare_plan(
             context=context,
-            action=Action.QUESTION_BATCH_RESTORE if restore else Action.QUESTION_BATCH_TRASH,
+            action=Action(f"{object_type.value}_batch_{'restore' if restore else 'trash'}"),
             mutations=mutations,
             arguments={
-                "question_ids": ids,
+                f"{object_type.value}_ids": ids,
                 "restore": restore,
                 "collection_id": collection_id,
                 "to_root": to_root,
@@ -3148,6 +3195,13 @@ class MetabaseRuntime:
                 collection_id=arguments.get("collection_id"),
                 to_root=arguments.get("to_root", False),
             )
+        elif selected in {Action.DASHBOARD_BATCH_TRASH, Action.DASHBOARD_BATCH_RESTORE}:
+            result = self.dashboard_batch_lifecycle_prepare(
+                arguments["dashboard_ids"],
+                restore=selected is Action.DASHBOARD_BATCH_RESTORE,
+                collection_id=arguments.get("collection_id"),
+                to_root=arguments.get("to_root", False),
+            )
         elif selected is Action.QUESTION_TRASH:
             result = self.question_trash_prepare(arguments["question_id"])
         elif selected is Action.QUESTION_RESTORE:
@@ -3237,6 +3291,8 @@ class MetabaseRuntime:
         if plan.action in {
             Action.QUESTION_BATCH_TRASH,
             Action.QUESTION_BATCH_RESTORE,
+            Action.DASHBOARD_BATCH_TRASH,
+            Action.DASHBOARD_BATCH_RESTORE,
             Action.NOTIFICATION_UPDATE,
             Action.NOTIFICATION_CREATE,
             Action.QUESTION_TRASH,
@@ -4075,6 +4131,11 @@ class MetabaseRuntime:
                     or mutation.write_payload[key] not in (None, [])
                 )
             }
+        # Tabs and dashcards are coupled even for a newly created empty shell.
+        # Omitting the empty sibling makes the provider ignore the tab update.
+        if {"tabs", "dashcards"}.intersection(update_payload):
+            for root in ("tabs", "dashcards"):
+                update_payload[root] = copy.deepcopy(mutation.write_payload[root])
         if update_payload:
             try:
                 self.http.put_json(f"/api/dashboard/{created_id}", update_payload)
@@ -4323,6 +4384,8 @@ class MetabaseRuntime:
                 Action.BATCH_ROLLBACK,
                 Action.QUESTION_BATCH_TRASH,
                 Action.QUESTION_BATCH_RESTORE,
+                Action.DASHBOARD_BATCH_TRASH,
+                Action.DASHBOARD_BATCH_RESTORE,
             }:
                 outcome, details = self._execute_batch(plan)
             elif plan.action is Action.DASHBOARD_CREATE:
