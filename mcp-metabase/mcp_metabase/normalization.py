@@ -193,18 +193,60 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _strip_mbql_field_uuids(value: Any) -> None:
-    """Drop generated field-clause IDs, preserving IDs on stages/joins/other clauses."""
-    if isinstance(value, list):
-        if value and value[0] == "value":
-            return  # Literal data is not a query AST.
-        if len(value) == 3 and value[0] == "field" and isinstance(value[1], dict):
-            value[1].pop("lib/uuid", None)
+def _mbql_clause_comparison(value: Any, aggregation_ids: dict[str, int]) -> None:
+    """Normalize clause identities, retaining literal data and reference targets."""
+    if not isinstance(value, list):
+        return
+    if len(value) >= 2 and isinstance(value[0], str) and isinstance(value[1], dict):
+        value[1].pop("lib/uuid", None)
+        if value[0] == "field" and len(value) == 3:
+            # Conversion provenance can disappear on save; actual types stay bound.
+            value[1].pop("lib/transformation-added-base-type", None)
+        if value[0] == "value":
+            return  # Its arguments are literal data, not an MBQL AST.
+        if value[0] == "aggregation" and len(value) == 3:
+            reference = value[2]
+            # UUIDs identify same-stage aggregations. Preserve the edge, not the
+            # random spelling; unresolved references remain distinct and bound.
+            value[2] = (
+                ["resolved-index", aggregation_ids[reference]]
+                if isinstance(reference, str) and reference in aggregation_ids
+                else ["unresolved-reference", reference]
+            )
+            return
+        for item in value[2:]:
+            _mbql_clause_comparison(item, aggregation_ids)
+    else:
         for item in value:
-            _strip_mbql_field_uuids(item)
-    elif isinstance(value, dict):
-        for item in value.values():
-            _strip_mbql_field_uuids(item)
+            _mbql_clause_comparison(item, aggregation_ids)
+
+
+def _mbql_stage_comparison(stage: Any) -> None:
+    if not isinstance(stage, dict) or stage.get("lib/type") != "mbql.stage/mbql":
+        return
+    aggregations = stage.get("aggregation")
+    ids: dict[str, int] = {}
+    duplicates: set[str] = set()
+    for index, clause in enumerate(aggregations if isinstance(aggregations, list) else []):
+        if isinstance(clause, list) and len(clause) >= 2 and isinstance(clause[1], dict):
+            identifier = clause[1].get("lib/uuid")
+            if isinstance(identifier, str):
+                if identifier in ids:
+                    duplicates.add(identifier)
+                ids[identifier] = index
+    for identifier in duplicates:
+        del ids[identifier]  # Never resolve an ambiguous reference.
+    for root in ("fields", "filters", "aggregation", "breakout", "order-by", "expressions"):
+        _mbql_clause_comparison(stage.get(root), ids)
+    joins = stage.get("joins")
+    for join in joins if isinstance(joins, list) else []:
+        if not isinstance(join, dict):
+            continue
+        for root in ("conditions", "fields"):
+            _mbql_clause_comparison(join.get(root), ids)
+        nested = join.get("stages")
+        for nested_stage in nested if isinstance(nested, list) else []:
+            _mbql_stage_comparison(nested_stage)
 
 
 def _native_field_filter_comparison(value: Any) -> Any:
@@ -215,18 +257,7 @@ def _native_field_filter_comparison(value: Any) -> Any:
     if result.get("lib/type") == "mbql/query":
         stages = result.get("stages")
         for stage in stages if isinstance(stages, list) else []:
-            if not isinstance(stage, dict) or stage.get("lib/type") != "mbql.stage/mbql":
-                continue
-            for root in (
-                "fields",
-                "filters",
-                "aggregation",
-                "breakout",
-                "order-by",
-                "expressions",
-                "joins",
-            ):
-                _strip_mbql_field_uuids(stage.get(root))
+            _mbql_stage_comparison(stage)
         containers = (
             [
                 stage

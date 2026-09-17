@@ -219,9 +219,15 @@ Channel credentials, hydrated cards/users и неизвестные blobs не �
   `METABASE_MCP_MAX_BATCH_ITEMS` позволяет установить 1–100); пустой/повторный inventory
   и неверное исходное archived-состояние отклоняются. Список проверяется до записи.
 
-Сравнение question state игнорирует только генерируемый `lib/uuid` в field-clause
-options MBQL, как и служебные аннотации native field filters. IDs полей, типы,
-alias, query/parameters/visualization, timestamps и прочие данные остаются bound;
+Сравнение question state игнорирует генерируемый `lib/uuid` в options MBQL clauses
+(поля, агрегаты, фильтры, выражения, сортировка), как и служебные аннотации native
+field filters. Ссылки на агрегаты сравниваются по позиции цели внутри своего stage,
+поэтому смена UUID не мешает проверке, а смена цели обнаруживается. Неоднозначные
+и неизвестные ссылки остаются bound. Literal data, stage/join identities, IDs полей,
+типы, alias, имена/формулы выражений, query/parameters/visualization и timestamps
+сохраняют проверку; неизвестные поля не исключаются. Все изменения comparison-only;
+у field clauses также игнорируется исчезающий при сохранении provenance marker
+`lib/transformation-added-base-type`, но сами `base-type`/`effective-type` проверяются;
 исходные payload не переписываются. Batch `rejected_stale` содержит
 `object_results[].stale_diagnostic`: ограниченные `changed_roots` и hashes до/после,
 без значений полей или SQL. Реальные изменения останавливают пакет; до новой
