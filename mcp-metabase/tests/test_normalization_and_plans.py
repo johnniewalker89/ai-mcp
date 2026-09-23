@@ -606,7 +606,9 @@ def test_dashboard_v063_missing_template_tag_is_rejected() -> None:
         build_mutation(
             object_type=ObjectType.DASHBOARD,
             raw_before=before,
-            operations=[PatchOperation(op="set", path="/description", value="Updated")],
+            operations=[
+                PatchOperation(op="replace_array", path="/dashcards", value=before["dashcards"])
+            ],
         )
 
 

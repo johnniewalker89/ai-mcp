@@ -248,14 +248,20 @@ def test_notification_read_and_local_paging(runtime):
     assert service.notification_get(70)["notification"]["active"] is False
 
 
-def test_notification_create_inactive_binds_question_and_reads_back(runtime):
+@pytest.mark.parametrize("active", [False, True])
+def test_notification_create_state_binds_question_and_reads_back(runtime, active):
     service, fake = runtime
-    body = {"question_id": 1, "cron_schedule": "0 0 9 ? * 2 *", "slack_recipient": "#test"}
+    body = {
+        "question_id": 1,
+        "cron_schedule": "0 0 9 ? * 2 *",
+        "slack_recipient": "#test",
+        "active": active,
+    }
     plan = service.action_prepare("notification_create", {"body": body})
     assert fake.post_calls == 0
     result = execute(service, plan)
     assert result["outcome"] == "applied_verified"
-    assert fake.notifications[80]["active"] is False
+    assert fake.notifications[80]["active"] is active
     assert fake.post_calls == 1
     stale = service.action_prepare("notification_create", {"body": body})
     fake.cards[1]["name"] = "Changed"
@@ -610,14 +616,44 @@ def test_batch_unknown_outcome_recovers_in_same_plan(runtime):
     assert all(card["archived"] for card in fake.cards.values())
 
 
-def test_notification_creation_cannot_activate_or_set_raw_api_fields(runtime):
+@pytest.mark.parametrize("extra", [{}, {"active": "true"}, {"active": True, "raw": {}}])
+def test_notification_creation_requires_explicit_boolean_and_no_raw_fields(runtime, extra):
     service, fake = runtime
     body = {
         "question_id": 1,
         "cron_schedule": "0 0 9 ? * 2 *",
         "slack_recipient": "#test",
-        "active": True,
+        **extra,
     }
     with pytest.raises(MutationValidationError):
         service.action_prepare("notification_create", {"body": body})
     assert fake.post_calls == 0
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_notification_unknown_create_never_repeats_post(runtime, active):
+    service, fake = runtime
+    original = fake.post_json
+
+    def lost(path, body):
+        original(path, body)
+        raise MetabaseApiError("lost response", outcome_unknown=True)
+
+    fake.post_json = lost
+    plan = service.action_prepare(
+        "notification_create",
+        {
+            "body": {
+                "question_id": 1,
+                "cron_schedule": "0 0 9 ? * 2 *",
+                "slack_recipient": "#test",
+                "active": active,
+            }
+        },
+    )
+    result = execute(service, plan)
+    assert result["outcome"] == "outcome_unknown"
+    assert fake.post_calls == 1 and fake.notifications[80]["active"] is active
+    with pytest.raises(Exception, match="consumed|already|outcome_unknown"):
+        execute(service, plan)
+    assert fake.post_calls == 1

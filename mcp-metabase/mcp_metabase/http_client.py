@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -18,7 +19,7 @@ QueryParams = Mapping[str, QueryParamScalar | list[QueryParamScalar]]
 
 
 class MetabaseApiError(RuntimeError):
-    """Safe Metabase API failure that never includes credentials or response bodies."""
+    """Bounded allowlisted diagnostics without raw response bodies or credentials."""
 
     def __init__(
         self,
@@ -26,10 +27,12 @@ class MetabaseApiError(RuntimeError):
         *,
         status_code: int | None = None,
         outcome_unknown: bool = False,
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.outcome_unknown = outcome_unknown
+        self.diagnostics = diagnostics or {}
 
 
 class MetabaseHttpClient:
@@ -116,10 +119,48 @@ class MetabaseHttpClient:
         request_id = redact_text(request_id, secrets=(self.config.api_key,))
         suffix = f" (request id {request_id})" if request_id else ""
         status = response.status_code
+        diagnostics: dict[str, Any] = {}
+        try:
+            self._ensure_identity_encoding(response)
+            data = json.loads(self._read_bounded(response, limit=16 * 1024))
+            if isinstance(data, dict):
+                error_type = data.get("error_type") or data.get("error-type")
+                if (
+                    isinstance(error_type, str)
+                    and self.config.api_key not in error_type
+                    and re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", error_type)
+                ):
+                    diagnostics["error_type"] = error_type
+                message = data.get("error") or data.get("message")
+                if isinstance(message, str):
+                    message = redact_text(message, secrets=(self.config.api_key,))
+                    code = re.search(r"\bCode:\s*(\d{1,6})\b", message)
+                    if code:
+                        diagnostics["code"] = int(code.group(1))
+                    symbol = re.findall(r"\(([A-Z][A-Z0-9_]{2,79})\)", message)
+                    if symbol:
+                        diagnostics["symbol"] = symbol[-1]
+                    message = re.split(
+                        r"(?i)\b(?:In scope|Stack trace|SELECT|WITH|INSERT|UPDATE|"
+                        r"DELETE|ALTER|CREATE)\b",
+                        message,
+                        maxsplit=1,
+                    )[0]
+                    message = re.sub(
+                        r"'(?:\\.|''|[^'\\])*'|\"(?:\\.|\"\"|[^\"\\])*\"", "<literal>", message
+                    )
+                    diagnostics["message"] = message[:600]
+                    diagnostics["detail_truncated"] = len(message) > 600
+        except (MetabaseApiError, ValueError, UnicodeDecodeError):
+            diagnostics["details_unavailable"] = True
+        detail = (
+            f" diagnostics={json.dumps(diagnostics, ensure_ascii=False)}" if diagnostics else ""
+        )
         return MetabaseApiError(
-            f"Metabase API request failed with HTTP {status}{suffix}.",
+            f"Metabase API request failed with HTTP {status}{suffix}.{detail}",
             status_code=status,
             outcome_unknown=mutation and status in _AMBIGUOUS_WRITE_STATUSES,
+            diagnostics=diagnostics,
         )
 
     def _send_once(

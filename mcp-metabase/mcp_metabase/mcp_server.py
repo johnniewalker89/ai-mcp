@@ -610,6 +610,7 @@ def metabase_search(
 def metabase_object_get(
     object_type: Literal[
         "notification",
+        "dashboard_subscription",
         "question",
         "dashboard",
         "collection",
@@ -647,20 +648,25 @@ def metabase_object_get(
 
 @mcp.tool()
 def metabase_notification_list(
-    question_id: int,
+    question_id: int | None = None,
     include_inactive: bool = False,
     limit: int = 20,
     offset: int = 0,
+    dashboard_id: int | None = None,
 ) -> dict[str, Any]:
-    """Read API-visible card notifications with local paging; excludes legacy Pulse.
+    """Read subscriptions: select exactly one question_id or dashboard_id.
 
     Use object_get(notification, id) for an exact read and notification_update
     through action_prepare/execute for bound schedule/recipient/send_once changes.
-    Upstream is card-filtered and byte-bounded, but does not paginate.
+    Dashboard subscriptions use legacy Pulse and are read-only; exact settings:
+    object_get(dashboard_subscription, id). include_inactive includes archived
+    dashboard subscriptions. Upstream is object-filtered and byte-bounded with
+    local paging. Visibility does not prove instance-wide absence/completeness.
     """
     return _call(
         "notification_list",
         question_id,
+        dashboard_id=dashboard_id,
         include_inactive=include_inactive,
         limit=limit,
         offset=offset,
@@ -752,8 +758,8 @@ def metabase_action_prepare(
 ) -> dict[str, Any]:
     """Prepare one exact action without writing; ordinary creates use arguments.body.
 
-    notification_create: body {question_id,cron_schedule,slack_recipient,send_once?};
-    creates inactive Slack card notification. notification_update: {notification_id,
+    notification_create: body {question_id,cron_schedule,slack_recipient,active,send_once?};
+    active explicitly selects delivery enabled/disabled. notification_update: {notification_id,
     patch:{active?,send_once?,schedules?:[{subscription_id,cron_schedule,ui_display_type?}],
     recipients?:[{handler_id,recipient_id,value}]}}. ui_display_type is cron/raw or
     cron/builder; timezone is instance-owned. No send/test action. Changes to active

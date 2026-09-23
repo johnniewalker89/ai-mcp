@@ -26,12 +26,13 @@ class RecipientPatch(BaseModel):
 
 
 class NotificationCreate(BaseModel):
-    """Создаём неактивную Slack notification; включение — отдельный exact update."""
+    """Slack notification with an explicitly selected active/inactive state."""
 
     model_config = ConfigDict(extra="forbid")
     question_id: StrictInt = Field(gt=0)
     cron_schedule: StrictStr = Field(min_length=1, max_length=200)
     slack_recipient: StrictStr = Field(min_length=2, max_length=254)
+    active: StrictBool
     send_once: StrictBool = False
 
     @model_validator(mode="after")
@@ -46,7 +47,7 @@ class NotificationCreate(BaseModel):
     def payload(self) -> dict[str, Any]:
         return {
             "payload_type": "notification/card",
-            "active": False,
+            "active": self.active,
             "payload": {
                 "card_id": self.question_id,
                 "send_condition": "has_result",

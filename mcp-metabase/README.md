@@ -16,6 +16,18 @@ Exact `question_update` только названия/описания допу�
 
 ## Установка из Git
 
+Диагностика HTTP ошибок возвращает ограниченные `error_type`, ClickHouse
+`code`/`symbol` и очищенное сообщение, когда они есть в ответе. SQL, stack trace
+и полный response body не выводятся. Семантика `outcome_unknown` и запрет
+автоматического повтора записи сохраняются.
+
+При lifecycle дашборда неизменяемые старые mappings не блокируют архивирование;
+редактирование `parameters`, `dashcards` или `tabs` по-прежнему проверяет mappings.
+В `collection_batch_trash(empty_only=true)` timeline без активных событий
+считается служебной оболочкой. Активные события блокируют empty-only; обычный
+trash/restore непустых коллекций сохранён. Timeline/event state связан с планом,
+неизвестное содержимое и неполный inventory отклоняются до записи.
+
 Нужны Git и `uv` 0.11.7. Выбери полный 40-символьный `<COMMIT_SHA>` и новый
 `<SOURCE_DIR>` для этой версии. Один раз подготовь runtime по `uv.lock`:
 
@@ -195,8 +207,14 @@ field filters сравнение исключает только служебн�
 ### Уведомления карточек и пакетная архивация
 
 `metabase_notification_list(question_id, include_inactive=false, limit=20, offset=0)`
-читает API-visible `notification/card`. Legacy Pulse и dashboard subscriptions
-сюда не входят. API фильтрует по карточке, но не поддерживает pagination:
+читает API-visible `notification/card`. Вместо `question_id` можно указать
+`dashboard_id`: тогда читаются legacy Pulse dashboard subscriptions;
+`include_inactive=true` включает архивные подписки. Ровно один selector обязателен.
+`metabase_object_get(object_type="dashboard_subscription", object_id=...)`
+возвращает безопасную проекцию `subscription` с расписаниями, каналами и получателями.
+`settings_complete=false` явно отмечает неполный upstream-снимок. Pulse write пока
+не поддерживается. Видимость API key не означает полноту по всему инстансу.
+API фильтрует по объекту, но не поддерживает pagination:
 `total`, `truncated`, `next_offset` относятся к локальной странице, а upstream
 ответ ограничен HTTP byte cap; `upstream_pagination=false` явно отмечает это.
 `metabase_object_get(object_type="notification", object_id=...)` возвращает
@@ -205,8 +223,11 @@ Channel credentials, hydrated cards/users и неизвестные blobs не �
 
 Через `metabase_action_prepare` / `metabase_action_execute` доступны:
 
-- `notification_create`: `arguments.body={question_id,cron_schedule,slack_recipient,send_once?}`.
-  Создаёт **неактивное** Slack-уведомление. Отдельное включение требует exact update.
+- `notification_create`: `arguments.body={question_id,cron_schedule,slack_recipient,active,send_once?}`.
+  `active` — обязательный boolean: оба режима равноправны, default отсутствует.
+  `active=true` сразу включает отправку по расписанию; `false` создаёт выключенную
+  рассылку. Выбор связан с exact plan и authoritative readback; отдельное включение
+  после создания не требуется. При неизвестном результате create не повторяется.
 - `notification_update`: `arguments={notification_id,patch:{send_once?,active?,
   schedules?:[{subscription_id,cron_schedule,ui_display_type?}],
   recipients?:[{handler_id,recipient_id,value}]}}`.

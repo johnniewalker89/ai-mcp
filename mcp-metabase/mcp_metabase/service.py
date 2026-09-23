@@ -53,6 +53,7 @@ from mcp_metabase.notifications import (
 )
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
 from mcp_metabase.query_policy import validate_native_preview_sql
+from mcp_metabase.subscriptions import subscription_public
 
 COLLECTION_REF_RE = re.compile(r"^(?:root|trash|[1-9][0-9]*|[A-Za-z0-9_-]{21})$")
 MUTATION_RECONCILIATION_ATTEMPTS = 3
@@ -169,7 +170,7 @@ COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
         "recipients?:[{handler_id,recipient_id,value}]}}"
     ),
     Action.NOTIFICATION_CREATE: (
-        "arguments.body={question_id,cron_schedule,slack_recipient,send_once?}; inactive only"
+        "arguments.body={question_id,cron_schedule,slack_recipient,active:bool,send_once?}"
     ),
     Action.QUESTION_BATCH_TRASH: "arguments={question_ids:[positive_integer]}",
     Action.QUESTION_BATCH_RESTORE: (
@@ -574,12 +575,19 @@ class MetabaseRuntime:
 
     def notification_list(
         self,
-        question_id: int,
+        question_id: int | None = None,
         *,
+        dashboard_id: int | None = None,
         include_inactive: bool = False,
         limit: int = 20,
         offset: int = 0,
     ) -> dict[str, Any]:
+        if (question_id is None) == (dashboard_id is None):
+            raise MutationValidationError("Select exactly one question_id or dashboard_id.")
+        if dashboard_id is not None:
+            return self.dashboard_subscription_list(
+                dashboard_id, include_inactive=include_inactive, limit=limit, offset=offset
+            )
         question_id = self._positive_id(question_id, "question_id")
         if type(include_inactive) is not bool or type(limit) is not int or type(offset) is not int:
             raise MutationValidationError("Notification list requires boolean/int arguments.")
@@ -622,6 +630,80 @@ class MetabaseRuntime:
             "upstream_pagination": False,
         }
 
+    def dashboard_subscription_get(self, subscription_id: int) -> dict[str, Any]:
+        subscription_id = self._positive_id(subscription_id, "subscription_id")
+        raw = self.http.get_json(f"/api/pulse/{subscription_id}")
+        if not isinstance(raw, dict) or raw.get("id") != subscription_id:
+            raise MutationValidationError("Dashboard subscription violated its exact id binding.")
+        try:
+            item = subscription_public(raw, max_items=self.config.max_list_items)
+        except ValueError as exc:
+            raise MutationValidationError(str(exc)) from None
+        return {
+            "origin": self.config.origin,
+            "object_type": "dashboard_subscription",
+            "object_id": subscription_id,
+            "subscription": item,
+            "scope": "API-key-visible legacy Pulse; read-only projected settings",
+        }
+
+    def dashboard_subscription_list(
+        self,
+        dashboard_id: int,
+        *,
+        include_inactive: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        dashboard_id = self._positive_id(dashboard_id, "dashboard_id")
+        if type(include_inactive) is not bool or type(limit) is not int or type(offset) is not int:
+            raise MutationValidationError("Subscription list requires boolean/int arguments.")
+        if not 1 <= limit <= self.config.max_list_items or offset < 0:
+            raise MutationValidationError("Subscription list page is outside configured bounds.")
+        rows = []
+        for archived in [False, True] if include_inactive else [False]:
+            raw = self.http.get_json(
+                "/api/pulse",
+                params={"dashboard_id": dashboard_id, "archived": str(archived).lower()},
+            )
+            if not isinstance(raw, list):
+                raise MutationValidationError("Dashboard subscription list has an invalid shape.")
+            for row in raw:
+                if (
+                    not isinstance(row, dict)
+                    or row.get("dashboard_id") != dashboard_id
+                    or row.get("archived") is not archived
+                ):
+                    raise MutationValidationError(
+                        "Dashboard subscription list violated its binding."
+                    )
+                self._positive_id(row.get("id"), "subscription_id")
+            rows.extend(raw)
+        rows.sort(key=lambda row: row["id"])
+        if len({row["id"] for row in rows}) != len(rows):
+            raise MutationValidationError("Dashboard subscription list contains duplicate ids.")
+        try:
+            items = [
+                subscription_public(row, max_items=self.config.max_list_items)
+                for row in rows[offset : offset + limit]
+            ]
+        except ValueError as exc:
+            raise MutationValidationError(str(exc)) from None
+        more = offset + len(items) < len(rows)
+        return {
+            "origin": self.config.origin,
+            "kind": "dashboard_subscription",
+            "dashboard_id": dashboard_id,
+            "items": items,
+            "total": len(rows),
+            "limit": limit,
+            "offset": offset,
+            "truncated": more,
+            "next_offset": offset + len(items) if more else None,
+            "upstream_pagination": False,
+            "scope": "API-key-visible legacy Pulse; visibility is not instance-wide completeness",
+        }
+
     def notification_create_prepare(self, body: dict[str, Any]) -> dict[str, Any]:
         context = self._write_context()
         try:
@@ -645,11 +727,13 @@ class MetabaseRuntime:
                         ),
                     }
                 ],
-                "active": False,
+                "active": request.active,
                 "slack_recipient": request.slack_recipient,
                 "cron_schedule": request.cron_schedule,
                 "send_once": request.send_once,
-                "side_effects": "Created inactive; activation requires a separate exact update.",
+                "side_effects": "Active subscription can deliver on schedule."
+                if request.active
+                else "Inactive subscription does not deliver.",
             }
         )
         payload = request.payload()
@@ -794,6 +878,8 @@ class MetabaseRuntime:
             return self.question_get_full(object_id)
         if object_type == "notification":
             return self.notification_get(object_id)
+        if object_type == "dashboard_subscription":
+            return self.dashboard_subscription_get(object_id)
         if object_type == "dashboard":
             if view == "layout":
                 return self.dashboard_get_layout(object_id)
@@ -2639,6 +2725,58 @@ class MetabaseRuntime:
             operations.append(operation)
         return operations
 
+    def _timeline_inventory_state(self, timeline_id: int) -> dict[str, Any]:
+        raw = self.http.get_json(
+            f"/api/timeline/{timeline_id}", params={"include": "events", "archived": "true"}
+        )
+        if not isinstance(raw, dict) or raw.get("id") != timeline_id:
+            raise MutationValidationError(f"Timeline {timeline_id} identity is incomplete.")
+        events = raw.get("events")
+        if (
+            type(raw.get("archived")) is not bool
+            or not isinstance(events, list)
+            or len(events) > self.config.max_list_items
+            or raw.get("has_more")
+            or raw.get("truncated")
+        ):
+            raise MutationValidationError(f"Timeline {timeline_id} requires complete events/state.")
+        state = {
+            key: copy.deepcopy(raw.get(key))
+            for key in ("id", "collection_id", "name", "description", "icon", "default", "archived")
+        }
+        state["events"] = []
+        ids = set()
+        for event in events:
+            if (
+                not isinstance(event, dict)
+                or type(event.get("id")) is not int
+                or event["id"] <= 0
+                or event["id"] in ids
+                or type(event.get("archived")) is not bool
+            ):
+                raise MutationValidationError(
+                    f"Timeline {timeline_id} has incomplete event identities."
+                )
+            ids.add(event["id"])
+            state["events"].append(
+                {
+                    key: copy.deepcopy(event.get(key))
+                    for key in (
+                        "id",
+                        "timeline_id",
+                        "name",
+                        "description",
+                        "icon",
+                        "timestamp",
+                        "timezone",
+                        "time_matters",
+                        "archived",
+                    )
+                }
+            )
+        state["events"].sort(key=lambda event: event["id"])
+        return state
+
     def _inventory_collection_tree(
         self, collection_id: int, *, strict: bool = False
     ) -> dict[str, Any]:
@@ -2706,10 +2844,25 @@ class MetabaseRuntime:
                 if strict and (model, item_id) in seen_items:
                     raise MutationValidationError("Collection inventory contains duplicate items.")
                 seen_items.add((model, item_id))
-                items.append({"model": model, "id": item_id})
-                if strict and model not in {"collection", "card", "dataset", "metric", "dashboard"}:
+                entry = {"model": model, "id": item_id}
+                if model == "timeline":
+                    entry["state"] = self._timeline_inventory_state(item_id)
+                    if entry["state"]["collection_id"] != current_id:
+                        raise MutationValidationError(
+                            f"Timeline {item_id} collection binding changed."
+                        )
+                items.append(entry)
+                if model not in {
+                    "collection",
+                    "card",
+                    "dataset",
+                    "metric",
+                    "dashboard",
+                    "timeline",
+                }:
                     raise MutationValidationError(
-                        "Collection batch cannot verify this content model."
+                        f"Collection {current_id} cannot verify content "
+                        f"model={model}, id={item_id}."
                     )
                 if model == "collection":
                     pending.append(item_id)
@@ -2768,7 +2921,14 @@ class MetabaseRuntime:
                     "Every collection must be in the expected initial state."
                 )
             inventory = self._inventory_collection_tree(cid, strict=True)
-            if empty_only and any(item["model"] != "collection" for item in inventory["items"]):
+            if empty_only and any(
+                item["model"] not in {"collection", "timeline"}
+                or (
+                    item["model"] == "timeline"
+                    and any(not event["archived"] for event in item["state"]["events"])
+                )
+                for item in inventory["items"]
+            ):
                 raise MutationValidationError(
                     f"Collection {cid} has active content; empty_only rejected."
                 )
@@ -3673,9 +3833,33 @@ class MetabaseRuntime:
     def _collection_cascade_readback(self, mutation: PlannedMutation) -> dict[str, Any]:
         results = []
         for item in mutation.target["inventory"]["items"]:
-            kind = {"collection": ObjectType.COLLECTION, "dashboard": ObjectType.DASHBOARD}.get(
-                item["model"], ObjectType.QUESTION
-            )
+            if item["model"] == "timeline":
+                try:
+                    current = self._timeline_inventory_state(item["id"])
+                    unchanged = current == item["state"]
+                    cascaded = copy.deepcopy(item["state"])
+                    cascaded["archived"] = mutation.after_state["archived"]
+                    for event in cascaded["events"]:
+                        event["archived"] = mutation.after_state["archived"]
+                    matches = unchanged or current == cascaded
+                except (MetabaseApiError, MutationValidationError):
+                    matches = False
+                results.append(
+                    {"object_type": "timeline", "object_id": item["id"], "verified": matches}
+                )
+                continue
+            kind = {
+                "collection": ObjectType.COLLECTION,
+                "dashboard": ObjectType.DASHBOARD,
+                "card": ObjectType.QUESTION,
+                "dataset": ObjectType.QUESTION,
+                "metric": ObjectType.QUESTION,
+            }.get(item["model"])
+            if kind is None:
+                results.append(
+                    {"object_type": item["model"], "object_id": item["id"], "verified": False}
+                )
+                continue
             try:
                 raw = self._object_raw(kind, item["id"])
                 matches = raw.get("archived") is mutation.after_state["archived"]

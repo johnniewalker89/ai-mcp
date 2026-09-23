@@ -1001,6 +1001,7 @@ def validate_state(
     object_type: ObjectType,
     *,
     require_executable_mappings: bool = False,
+    validate_parameter_mappings: bool = True,
 ) -> None:
     if object_type is ObjectType.QUESTION:
         if not isinstance(state.get("name"), str) or not state["name"].strip():
@@ -1026,10 +1027,11 @@ def validate_state(
         _positive_or_none(state.get("collection_id"), "Dashboard collection_id")
         if "archived" in state and type(state["archived"]) is not bool:
             raise MutationValidationError("Dashboard archived must be boolean.")
-        _validate_dashboard_parameter_compatibility(
-            state,
-            require_executable_mappings=require_executable_mappings,
-        )
+        if validate_parameter_mappings:
+            _validate_dashboard_parameter_compatibility(
+                state,
+                require_executable_mappings=require_executable_mappings,
+            )
     elif object_type is ObjectType.COLLECTION:
         if not isinstance(state.get("name"), str) or not state["name"].strip():
             raise MutationValidationError("Collection name must be non-empty.")
@@ -1086,7 +1088,14 @@ def build_mutation(
     if not 1 <= len(operations) <= 100:
         raise MutationValidationError("Patch must contain between 1 and 100 operations.")
     before = project_state(raw_before, object_type)
-    validate_state(_dashboard_validation_state(before, dashboard_cards), object_type)
+    mapping_roots_touched = any(
+        op.path.split("/")[1] in {"parameters", "dashcards", "tabs"}
+        for op in operations
+    )
+    validate_state(
+        _dashboard_validation_state(before, dashboard_cards), object_type,
+        validate_parameter_mappings=mapping_roots_touched,
+    )
     after = copy.deepcopy(before)
     changed_roots = tuple(
         dict.fromkeys(_apply_operation(after, object_type, op) for op in operations)
@@ -1115,6 +1124,7 @@ def build_mutation(
         _dashboard_validation_state(after, dashboard_cards),
         object_type,
         require_executable_mappings=require_executable_mappings,
+        validate_parameter_mappings=mapping_roots_touched,
     )
     if object_state_sha256(before, object_type) == object_state_sha256(after, object_type):
         raise MutationValidationError("Patch produces no state change.")
