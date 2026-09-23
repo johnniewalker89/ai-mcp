@@ -57,3 +57,12 @@ def test_actual_mapping_edit_still_rejects_missing_template_tag():
             raw_before=broken_dashboard(),
             operations=[PatchOperation(op="replace_array", path="/parameters", value=[])],
         )
+
+
+def test_invalid_patch_path_returns_validation_error_not_index_error():
+    with pytest.raises(MutationValidationError):
+        build_mutation(
+            object_type=ObjectType.DASHBOARD,
+            raw_before=broken_dashboard(),
+            operations=[PatchOperation(op="set", path="description", value="x")],
+        )

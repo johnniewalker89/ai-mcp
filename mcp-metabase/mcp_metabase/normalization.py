@@ -1089,7 +1089,7 @@ def build_mutation(
         raise MutationValidationError("Patch must contain between 1 and 100 operations.")
     before = project_state(raw_before, object_type)
     mapping_roots_touched = any(
-        op.path.split("/")[1] in {"parameters", "dashcards", "tabs"}
+        op.path.partition("/")[2].partition("/")[0] in {"parameters", "dashcards", "tabs"}
         for op in operations
     )
     validate_state(
