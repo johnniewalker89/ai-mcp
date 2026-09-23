@@ -19,6 +19,9 @@ logger = logging.getLogger(MCP_SERVER_NAME)
 mcp = FastMCP(name=MCP_SERVER_NAME)
 _RUNTIME: MetabaseRuntime | None = None
 CompactActionName = Literal[
+    "timeline_create",
+    "timeline_archive",
+    "timeline_restore",
     "notification_update",
     "notification_create",
     "question_batch_trash",
@@ -611,6 +614,7 @@ def metabase_object_get(
     object_type: Literal[
         "notification",
         "dashboard_subscription",
+        "timeline",
         "question",
         "dashboard",
         "collection",
@@ -626,7 +630,8 @@ def metabase_object_get(
 ) -> dict[str, Any]:
     """Read one typed object. Response keys by object_type (all include origin):
 
-    full: question/dashboard -> object, object_type, object_id, state_sha256;
+    full: question/dashboard/timeline -> object, object_type, object_id, state_sha256;
+    timeline includes bounded complete events (active and archived); oversized lists fail.
     collection/database/table/field -> the matching named key (table.fields,
     NOT object.fields). field_values -> top-level values and truncated.
     include_fields affects only table; limit affects only field_values.
@@ -758,6 +763,9 @@ def metabase_action_prepare(
 ) -> dict[str, Any]:
     """Prepare one exact action without writing; ordinary creates use arguments.body.
 
+    timeline_create: body {name,collection_id:int|null,description?,icon?,default?,archived?};
+    timeline_archive/timeline_restore: {timeline_id}; cascades to ALL bound events.
+    Restore reactivates all events. No permanent delete or generic timeline rollback.
     notification_create: body {question_id,cron_schedule,slack_recipient,active,send_once?};
     active explicitly selects delivery enabled/disabled. notification_update: {notification_id,
     patch:{active?,send_once?,schedules?:[{subscription_id,cron_schedule,ui_display_type?}],

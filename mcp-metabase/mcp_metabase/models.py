@@ -4,12 +4,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
 class ObjectType(StrEnum):
+    TIMELINE = "timeline"
     NOTIFICATION = "notification"
     QUESTION = "question"
     DASHBOARD = "dashboard"
@@ -19,6 +20,9 @@ class ObjectType(StrEnum):
 
 
 class Action(StrEnum):
+    TIMELINE_CREATE = "timeline_create"
+    TIMELINE_ARCHIVE = "timeline_archive"
+    TIMELINE_RESTORE = "timeline_restore"
     NOTIFICATION_CREATE = "notification_create"
     NOTIFICATION_UPDATE = "notification_update"
     NOTIFICATION_ROLLBACK = "notification_rollback"
@@ -148,6 +152,17 @@ class DashboardCreate(BaseModel):
     width: Literal["fixed", "full"] | None = None
     dashcards: list[dict[str, JsonValue]] = Field(default_factory=list, max_length=200)
     tabs: list[dict[str, JsonValue]] = Field(default_factory=list, max_length=100)
+
+
+class TimelineCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: StrictStr = Field(min_length=1, max_length=254, pattern=r"\S")
+    collection_id: StrictInt | None = Field(gt=0)
+    description: StrictStr | None = Field(default=None, max_length=10000)
+    icon: Literal["star", "cake", "mail", "warning", "bell", "cloud"] = "star"
+    default: StrictBool = False
+    archived: StrictBool = False
 
 
 class CollectionCreate(BaseModel):

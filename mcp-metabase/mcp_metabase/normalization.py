@@ -14,6 +14,16 @@ class MutationValidationError(RuntimeError):
 
 
 STATE_FIELDS: dict[ObjectType, tuple[str, ...]] = {
+    ObjectType.TIMELINE: (
+        "id",
+        "collection_id",
+        "name",
+        "description",
+        "icon",
+        "default",
+        "archived",
+        "events",
+    ),
     ObjectType.QUESTION: (
         "id",
         "entity_id",
@@ -1093,7 +1103,8 @@ def build_mutation(
         for op in operations
     )
     validate_state(
-        _dashboard_validation_state(before, dashboard_cards), object_type,
+        _dashboard_validation_state(before, dashboard_cards),
+        object_type,
         validate_parameter_mappings=mapping_roots_touched,
     )
     after = copy.deepcopy(before)
@@ -1319,7 +1330,7 @@ def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> 
     readback = project_state(raw_readback, mutation.object_type)
     if readback.get("id") != mutation.object_id:
         return False
-    if mutation.object_type is ObjectType.NOTIFICATION:
+    if mutation.object_type in {ObjectType.NOTIFICATION, ObjectType.TIMELINE}:
         return readback == mutation.after_state
     roots = set(mutation.changed_roots) | (
         set(PROTECTED_ROOTS.get(mutation.object_type, frozenset())) - set(mutation.changed_roots)

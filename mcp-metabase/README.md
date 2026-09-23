@@ -16,6 +16,34 @@ Exact `question_update` только названия/описания допу�
 
 ## Установка из Git
 
+### Timeline
+
+В существующем `metabase_action_prepare` доступны:
+
+- `timeline_create`: `arguments.body={name,collection_id,description?,icon?,default?,archived?}`.
+  `collection_id` обязателен: положительный ID либо явный `null` для корня.
+  Иконки: `star`, `cake`, `mail`, `warning`, `bell`, `cloud`; default и archived —
+  строгие bool (по умолчанию false). Создание не добавляет события.
+- `timeline_archive` и `timeline_restore`: `arguments={timeline_id}`.
+  Это обратимое архивирование, не DELETE. Metabase применяет archived ко **всем**
+  событиям timeline: restore включает даже ранее архивированные события.
+  План показывает полный набор IDs, число меняющих состояние событий и этот эффект.
+- `metabase_object_get(object_type="timeline",object_id=...)` возвращает `object`
+  с активными/архивными событиями и `state_sha256`. Неполный, дублированный или
+  превышающий max_list_items список событий отклоняется, а не обрезается молча.
+
+Execute использует обычный exact plan: identity/version/TTL и состояние коллекции,
+timeline и событий перепроверяются. POST выполняется один раз; неизвестный исход
+не вызывает повторное создание. Созданный ID подтверждается отдельным GET.
+Archive/restore отправляет только archived; затем GET проверяет ожидаемый каскад.
+Timeline не открывает work-session и не принимает generic patches/batch edits.
+Общий rollback для timeline недоступен: один upstream PUT не восстанавливает
+прежнюю смесь активных/архивных событий. Для cleanup используй `timeline_archive`.
+Редактирование событий и безвозвратное удаление не входят в этот контракт.
+
+Контракт сверяется с [Metabase v0.63 API](https://www.metabase.com/docs/v0.63/api.json).
+Общее число инструментов остаётся15; расширены закрытые actions и object types.
+
 Диагностика HTTP ошибок возвращает ограниченные `error_type`, ClickHouse
 `code`/`symbol` и очищенное сообщение, когда они есть в ответе. SQL, stack trace
 и полный response body не выводятся. Семантика `outcome_unknown` и запрет

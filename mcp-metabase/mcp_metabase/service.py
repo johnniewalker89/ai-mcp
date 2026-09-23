@@ -28,6 +28,7 @@ from mcp_metabase.models import (
     PlannedMutation,
     QuestionCreate,
     QuestionPreview,
+    TimelineCreate,
 )
 from mcp_metabase.normalization import (
     MutationValidationError,
@@ -77,6 +78,9 @@ SEARCH_MODELS = frozenset(
 )
 COMPACT_MUTATION_ACTIONS = frozenset(
     {
+        Action.TIMELINE_CREATE,
+        Action.TIMELINE_ARCHIVE,
+        Action.TIMELINE_RESTORE,
         Action.NOTIFICATION_UPDATE,
         Action.NOTIFICATION_CREATE,
         Action.QUESTION_BATCH_TRASH,
@@ -106,6 +110,9 @@ COMPACT_MUTATION_ACTIONS = frozenset(
     }
 )
 COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]] = {
+    Action.TIMELINE_CREATE: (frozenset({"body"}), frozenset()),
+    Action.TIMELINE_ARCHIVE: (frozenset({"timeline_id"}), frozenset()),
+    Action.TIMELINE_RESTORE: (frozenset({"timeline_id"}), frozenset()),
     Action.NOTIFICATION_UPDATE: (frozenset({"notification_id", "patch"}), frozenset()),
     Action.NOTIFICATION_CREATE: (frozenset({"body"}), frozenset()),
     Action.QUESTION_BATCH_TRASH: (frozenset({"question_ids"}), frozenset()),
@@ -164,6 +171,11 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.BATCH: (frozenset({"items"}), frozenset()),
 }
 COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
+    Action.TIMELINE_CREATE: (
+        "arguments.body={name,collection_id:int|null,description?,icon?,default?:bool,archived?:bool}"
+    ),
+    Action.TIMELINE_ARCHIVE: "arguments={timeline_id:positive_integer}",
+    Action.TIMELINE_RESTORE: "arguments={timeline_id:positive_integer}",
     Action.NOTIFICATION_UPDATE: (
         "arguments={notification_id,patch:{send_once?,active?,"
         "schedules?:[{subscription_id,cron_schedule,ui_display_type?}],"
@@ -391,6 +403,7 @@ class MetabaseRuntime:
                 "dashboard_batch_lifecycle": True,
                 "collection_batch_lifecycle": True,
                 "collection_batch_empty_only": True,
+                "timeline_create_read_archive_restore": True,
                 "permanent_delete": False,
                 "generic_api": False,
                 "arbitrary_sql": False,
@@ -531,6 +544,8 @@ class MetabaseRuntime:
 
     def _object_raw(self, object_type: ObjectType, object_id: int) -> dict[str, Any]:
         object_id = self._positive_id(object_id, f"{object_type.value} id")
+        if object_type is ObjectType.TIMELINE:
+            return self._timeline_inventory_state(object_id)
         paths = {
             ObjectType.NOTIFICATION: f"/api/notification/{object_id}",
             ObjectType.QUESTION: f"/api/card/{object_id}",
@@ -874,6 +889,8 @@ class MetabaseRuntime:
             raise MutationValidationError(
                 "Metabase object id must be a positive integer for this object type."
             )
+        if object_type == "timeline":
+            return self._full_object(ObjectType.TIMELINE, object_id)
         if object_type == "question":
             return self.question_get_full(object_id)
         if object_type == "notification":
@@ -2600,6 +2617,77 @@ class MetabaseRuntime:
             },
         )
 
+    def timeline_create_prepare(self, body: dict[str, Any]) -> dict[str, Any]:
+        context = self._write_context()
+        try:
+            request = TimelineCreate.model_validate(body)
+        except ValidationError as exc:
+            raise self._validation_error(
+                exc, action=Action.TIMELINE_CREATE, path_prefix="arguments.body"
+            ) from None
+        payload = request.model_dump(mode="json")
+        target = self._collection_baseline(request.collection_id)
+        target.update({"name": request.name, "create_kind": "timeline"})
+        expected = {**copy.deepcopy(payload), "events": []}
+        mutation = PlannedMutation(
+            object_type=ObjectType.TIMELINE,
+            object_id=None,
+            before_state=None,
+            after_state=expected,
+            write_payload=payload,
+            changed_roots=tuple(payload),
+            before_sha256=None,
+            after_sha256=canonical_sha256(expected),
+            target=target,
+        )
+        return self._prepare_plan(
+            context=context,
+            action=Action.TIMELINE_CREATE,
+            mutations=[mutation],
+            arguments={"body_sha256": canonical_sha256(payload)},
+        )
+
+    def timeline_lifecycle_prepare(self, timeline_id: int, *, restore: bool) -> dict[str, Any]:
+        context = self._write_context()
+        before = self._object_raw(ObjectType.TIMELINE, timeline_id)
+        if before["archived"] is not restore:
+            raise MutationValidationError("Timeline is not in the expected initial archive state.")
+        target = self._collection_baseline(before["collection_id"])
+        after = copy.deepcopy(before)
+        after["archived"] = not restore
+        for event in after["events"]:
+            event["archived"] = not restore
+        target.update(
+            {
+                "name": before["name"],
+                "event_ids": [event["id"] for event in before["events"]],
+                "events_changing_state": sum(
+                    event["archived"] is restore for event in before["events"]
+                ),
+                "side_effects": (
+                    "Metabase changes archived for every event, including archived ones; "
+                    "restore reactivates all bound events. Generic rollback is unavailable."
+                ),
+            }
+        )
+        mutation = PlannedMutation(
+            object_type=ObjectType.TIMELINE,
+            object_id=timeline_id,
+            before_state=before,
+            after_state=after,
+            write_payload={"archived": not restore},
+            changed_roots=("archived",),
+            before_sha256=object_state_sha256(before, ObjectType.TIMELINE),
+            after_sha256=object_state_sha256(after, ObjectType.TIMELINE),
+            target=target,
+        )
+        return self._prepare_plan(
+            context=context,
+            action=Action.TIMELINE_RESTORE if restore else Action.TIMELINE_ARCHIVE,
+            mutations=[mutation],
+            arguments={"timeline_id": timeline_id},
+        )
+
     def collection_create_prepare(self, body: dict[str, Any]) -> dict[str, Any]:
         context = self._write_context()
         try:
@@ -2726,14 +2814,22 @@ class MetabaseRuntime:
         return operations
 
     def _timeline_inventory_state(self, timeline_id: int) -> dict[str, Any]:
+        timeline_id = self._positive_id(timeline_id, "timeline_id")
         raw = self.http.get_json(
             f"/api/timeline/{timeline_id}", params={"include": "events", "archived": "true"}
         )
-        if not isinstance(raw, dict) or raw.get("id") != timeline_id:
+        if not isinstance(raw, dict) or type(raw.get("id")) is not int or raw["id"] != timeline_id:
             raise MutationValidationError(f"Timeline {timeline_id} identity is incomplete.")
         events = raw.get("events")
         if (
             type(raw.get("archived")) is not bool
+            or "collection_id" not in raw
+            or (
+                raw["collection_id"] is not None
+                and (type(raw["collection_id"]) is not int or raw["collection_id"] <= 0)
+            )
+            or not isinstance(raw.get("name"), str)
+            or not raw["name"].strip()
             or not isinstance(events, list)
             or len(events) > self.config.max_list_items
             or raw.get("has_more")
@@ -3483,7 +3579,13 @@ class MetabaseRuntime:
 
         selected = self._compact_action(action)
         self._closed_action_arguments(action, selected, arguments)
-        if selected is Action.QUESTION_CREATE:
+        if selected is Action.TIMELINE_CREATE:
+            result = self.timeline_create_prepare(arguments["body"])
+        elif selected in {Action.TIMELINE_ARCHIVE, Action.TIMELINE_RESTORE}:
+            result = self.timeline_lifecycle_prepare(
+                arguments["timeline_id"], restore=selected is Action.TIMELINE_RESTORE
+            )
+        elif selected is Action.QUESTION_CREATE:
             result = self.question_create_prepare(arguments["body"])
         elif selected is Action.QUESTION_CLONE:
             result = self.question_clone_prepare(
@@ -3797,6 +3899,10 @@ class MetabaseRuntime:
         current = project_state(current_raw, mutation.object_type)
         if not self._mutation_before_matches(mutation, current):
             return False, current_raw
+        if mutation.object_type is ObjectType.TIMELINE:
+            baseline = self._collection_baseline(current["collection_id"])
+            if baseline["state_sha256"] != mutation.target.get("state_sha256"):
+                return False, current_raw
         expected_inventory = mutation.target.get("inventory")
         if expected_inventory is not None:
             if mutation.object_type is not ObjectType.COLLECTION:
@@ -3819,6 +3925,7 @@ class MetabaseRuntime:
         if mutation.object_id is None:
             raise MutationValidationError("Metabase update mutation has no object id.")
         prefixes = {
+            ObjectType.TIMELINE: "timeline",
             ObjectType.NOTIFICATION: "notification",
             ObjectType.QUESTION: "card",
             ObjectType.DASHBOARD: "dashboard",
@@ -4398,6 +4505,8 @@ class MetabaseRuntime:
                 "recommended_action": (
                     "notification_update(active=false)"
                     if mutation.object_type is ObjectType.NOTIFICATION
+                    else "timeline_archive"
+                    if mutation.object_type is ObjectType.TIMELINE
                     else "trash_prepare"
                 ),
             },
@@ -4590,6 +4699,8 @@ class MetabaseRuntime:
             }
         if plan.action in {Action.QUESTION_CREATE, Action.QUESTION_CLONE}:
             path = "/api/card"
+        elif plan.action is Action.TIMELINE_CREATE:
+            path = "/api/timeline"
         elif plan.action is Action.NOTIFICATION_CREATE:
             path = "/api/notification"
         elif plan.action in {Action.COLLECTION_CREATE, Action.COLLECTION_CLONE}:
@@ -4757,6 +4868,8 @@ class MetabaseRuntime:
             )
 
         update_actions = {
+            Action.TIMELINE_ARCHIVE,
+            Action.TIMELINE_RESTORE,
             Action.NOTIFICATION_UPDATE,
             Action.NOTIFICATION_ROLLBACK,
             Action.QUESTION_UPDATE,
@@ -4775,6 +4888,7 @@ class MetabaseRuntime:
             Action.FIELD_ROLLBACK,
         }
         simple_create_actions = {
+            Action.TIMELINE_CREATE,
             Action.NOTIFICATION_CREATE,
             Action.QUESTION_CREATE,
             Action.QUESTION_CLONE,
@@ -4869,6 +4983,11 @@ class MetabaseRuntime:
             if not 0 <= index < len(source.mutations):
                 raise MetabasePolicyError("Source plan applied-mutation index is invalid.")
             source_mutation = source.mutations[index]
+            if source_mutation.object_type is ObjectType.TIMELINE:
+                raise MetabasePolicyError(
+                    "Timeline lifecycle uses explicit archive/restore; rollback is unavailable "
+                    "because Metabase applies archive state to all events."
+                )
             if source_mutation.object_id is None:
                 raise MetabasePolicyError(
                     "Created objects use their typed trash action instead of automatic rollback."
