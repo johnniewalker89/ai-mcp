@@ -122,7 +122,7 @@ class MetabaseHttpClient:
         diagnostics: dict[str, Any] = {}
         try:
             self._ensure_identity_encoding(response)
-            data = json.loads(self._read_bounded(response, limit=16 * 1024))
+            data = json.loads(self._read_bounded(response, limit=self.config.max_json_bytes))
             if isinstance(data, dict):
                 error_type = data.get("error_type") or data.get("error-type")
                 if (
