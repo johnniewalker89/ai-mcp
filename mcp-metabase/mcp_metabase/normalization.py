@@ -7,6 +7,7 @@ from typing import Any
 
 from mcp_metabase.models import ObjectType, PatchOperation, PlannedMutation
 from mcp_metabase.notifications import notification_state
+from mcp_metabase.subscriptions import subscription_state
 
 
 class MutationValidationError(RuntimeError):
@@ -440,6 +441,8 @@ def dataset_query_semantically_matches(expected: Any, actual: Any) -> bool:
 
 
 def project_state(raw: dict[str, Any], object_type: ObjectType) -> dict[str, Any]:
+    if object_type is ObjectType.DASHBOARD_SUBSCRIPTION:
+        return subscription_state(raw)
     if object_type is ObjectType.NOTIFICATION:
         return notification_state(raw)
     if not isinstance(raw, dict):
@@ -1330,7 +1333,11 @@ def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> 
     readback = project_state(raw_readback, mutation.object_type)
     if readback.get("id") != mutation.object_id:
         return False
-    if mutation.object_type in {ObjectType.NOTIFICATION, ObjectType.TIMELINE}:
+    if mutation.object_type in {
+        ObjectType.NOTIFICATION,
+        ObjectType.TIMELINE,
+        ObjectType.DASHBOARD_SUBSCRIPTION,
+    }:
         return readback == mutation.after_state
     roots = set(mutation.changed_roots) | (
         set(PROTECTED_ROOTS.get(mutation.object_type, frozenset())) - set(mutation.changed_roots)

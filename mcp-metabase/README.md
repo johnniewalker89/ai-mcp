@@ -245,8 +245,8 @@ field filters сравнение исключает только служебн�
 `include_inactive=true` включает архивные подписки. Ровно один selector обязателен.
 `metabase_object_get(object_type="dashboard_subscription", object_id=...)`
 возвращает безопасную проекцию `subscription` с расписаниями, каналами и получателями.
-`settings_complete=false` явно отмечает неполный upstream-снимок. Pulse write пока
-не поддерживается. Видимость API key не означает полноту по всему инстансу.
+`settings_complete=false` явно отмечает неполный upstream-снимок. Запись Pulse
+доступна отдельными действиями ниже. Видимость API key не означает полноту по инстансу.
 API фильтрует по объекту, но не поддерживает pagination:
 `total`, `truncated`, `next_offset` относятся к локальной странице, а upstream
 ответ ограничен HTTP byte cap; `upstream_pagination=false` явно отмечает это.
@@ -255,6 +255,57 @@ API фильтрует по объекту, но не поддерживает p
 Channel credentials, hydrated cards/users и неизвестные blobs не выводятся.
 
 Через `metabase_action_prepare` / `metabase_action_execute` доступны:
+
+- `dashboard_subscription_create`: `arguments.body={dashboard_id,name,cards,channels,
+  parameters?,skip_if_empty?}` → `POST /api/pulse`. Каждая карточка —
+  `{id,dashboard_card_id,include_csv?,include_xls?,format_rows?,pivot_results?}`;
+  `dashboard_card_id` должен соответствовать конкретному размещению карточки на дашборде.
+  Каждый канал — `{channel_type,enabled,schedule_type,details?,recipients?,channel_id?,
+  schedule_hour?,schedule_day?,schedule_frame?}`. `enabled` обязателен: можно сразу
+  создать включённую или выключенную рассылку. `channel_type`: `email`, `slack`, `http`.
+  Email-получатель — `{id?,email}`; email обязателен и при указанном user id.
+  Slack использует `details.channel` и/или `details.channel_id` (строки);
+  HTTP использует `channel_id` существующего настроенного канала (положительное число),
+  произвольного URL в аргументах нет. `details` также допускает boolean
+  `attachment_only` и `include_pdf`. `schedule_type`: `hourly/daily/weekly/monthly`;
+  hour — 0–23, day — `mon/tue/wed/thu/fri/sat/sun`, monthly frame — `first/mid/last`.
+  Daily требует hour; weekly — hour/day; monthly — hour/frame, при `mid` day должен быть null.
+- `dashboard_subscription_update`: `arguments={subscription_id,patch:{name?,archived?,
+  skip_if_empty?,cards?,parameters?,channels?:[{id,enabled?,details?,recipients?,
+  schedule_type?,schedule_hour?,schedule_day?,schedule_frame?}]}}` → `PUT /api/pulse/{id}`.
+  Изменения каналов объединяются по существующим ID; остальные каналы и неизвестные
+  поля details сохраняются. `recipients`, `cards`, `parameters`, если указаны, заменяют
+  соответствующий список полностью. Имя/type канала и привязка HTTP channel_id не меняются.
+  Для смены Slack destination с прежним `details.channel_id` передай новый ID либо
+  явный `channel_id:null`, чтобы убрать старую привязку.
+  `archived:true` выключает все каналы; переход в `archived:false` включает все,
+  включая ранее выключенные. Одновременно менять archived и channel.enabled нельзя.
+  Обычная правка явно сохраняет archived/skip_if_empty и не включает архивную подписку.
+  Неизменённые cards/parameters/channels не пересылаются: GET Pulse скрывает архивные
+  карточки, поэтому его видимый список нельзя без запроса использовать как замену всего.
+- `dashboard_subscription_test`: `arguments={subscription_id,channel_ids:[...]}` →
+  `POST /api/pulse/test`. Отправляет существующую подписку один раз только в явно
+  выбранные каналы, включая выключенные, без сохранения настроек. Тело отправки,
+  получатели и фильтры связаны с exact plan. Успех — `delivery_request_accepted`:
+  Metabase вернул `ok:true`; это не доказывает доставку адресату или наличие непустых
+  данных. При потере ответа — `outcome_unknown`, автоматического повтора нет;
+  использованный план повторно выполнить нельзя. Для повторной отправки нужен новый
+  осознанно подготовленный план. Отправленное сообщение нельзя откатить.
+
+Pulse update/test требуют подтверждённого superuser: sandbox/impersonation может
+скрывать часть получателей даже при доступном GET. Создание использует явно заданных
+получателей и не требует этой дополнительной проверки. Неполные снимки и неизвестные
+ID отклоняются до записи. План связывает подписку, дашборд и исходные вопросы;
+изменение их состояния блокирует execute. Каждый список ограничен 100 элементами,
+дополнительно действует общий byte cap плана. `parameters` — массив параметров
+дашборда с `id`, `type` и сохранёнными `value/default`; id/type должны совпадать
+с дашбордом. Для test формируется отдельная проекция parameter-values API.
+После create/update результат подтверждается точным GET; неизвестный create не
+повторяется. Автоматического Pulse rollback нет: обратное изменение — новый явный
+update, удаление созданной рассылки из расписания — update с `archived:true`.
+Чтение Pulse остаётся доступным без superuser. Новых MCP-инструментов нет: всего 15.
+
+Для уведомлений вопросов и пакетных операций:
 
 - `notification_create`: `arguments.body={question_id,cron_schedule,slack_recipient,active,send_once?}`.
   `active` — обязательный boolean: оба режима равноправны, default отсутствует.
@@ -324,7 +375,8 @@ handlers и recipients; не заменяет notification неполным payl
 `email/handlebars-resource` отклоняются, чтобы не повредить существующие связи.
 Prepare показывает изменение и побочные эффекты: включение/отключение notification
 может отправить provider subscription emails; активное расписание может сработать позже.
-Отдельных send/test endpoint нет. Notification не входит в work session.
+Отдельного send/test действия для notification/card нет; Pulse test описан выше.
+Notification и Pulse не входят в work session.
 
 Exact rollback поддерживает подтверждённые notification updates и проверяет свежий
 state hash. Для batch сохранены пообъектные outcomes, rollback только verified

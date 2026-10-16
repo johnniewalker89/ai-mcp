@@ -65,7 +65,7 @@ def test_filtered_read_projection_and_paging(runtime):
     assert second["items"][0]["archived"] is True and not second["truncated"]
     exact = runtime.object_get("dashboard_subscription", 10)
     item = exact["subscription"]
-    assert item["settings_complete"] and item["write_supported"] is False
+    assert item["settings_complete"] and item["write_supported"] is True
     assert item["channels"][0]["destination"] == {"channel": "#reports"}
     for forbidden in ("hydrated-secret", "hidden-sql", "hidden-token"):
         assert forbidden not in json.dumps([page, exact])

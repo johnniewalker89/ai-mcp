@@ -19,6 +19,9 @@ logger = logging.getLogger(MCP_SERVER_NAME)
 mcp = FastMCP(name=MCP_SERVER_NAME)
 _RUNTIME: MetabaseRuntime | None = None
 CompactActionName = Literal[
+    "dashboard_subscription_create",
+    "dashboard_subscription_update",
+    "dashboard_subscription_test",
     "timeline_create",
     "timeline_archive",
     "timeline_restore",
@@ -663,7 +666,7 @@ def metabase_notification_list(
 
     Use object_get(notification, id) for an exact read and notification_update
     through action_prepare/execute for bound schedule/recipient/send_once changes.
-    Dashboard subscriptions use legacy Pulse and are read-only; exact settings:
+    Dashboard subscriptions use legacy Pulse; exact settings:
     object_get(dashboard_subscription, id). include_inactive includes archived
     dashboard subscriptions. Upstream is object-filtered and byte-bounded with
     local paging. Visibility does not prove instance-wide absence/completeness.
@@ -770,8 +773,23 @@ def metabase_action_prepare(
     active explicitly selects delivery enabled/disabled. notification_update: {notification_id,
     patch:{active?,send_once?,schedules?:[{subscription_id,cron_schedule,ui_display_type?}],
     recipients?:[{handler_id,recipient_id,value}]}}. ui_display_type is cron/raw or
-    cron/builder; timezone is instance-owned. No send/test action. Changes to active
+    cron/builder; timezone is instance-owned. Changes to active
     may cause subscription emails and scheduled delivery.
+    dashboard_subscription_create: body {dashboard_id,name,cards:[{id,dashboard_card_id,
+    include_csv?,include_xls?,format_rows?,pivot_results?}],channels:[{channel_type,
+    enabled,details?,recipients?,channel_id?,schedule_type,schedule_hour?,schedule_day?,
+    schedule_frame?}],parameters?,skip_if_empty?}. channel_type: email/slack/http;
+    details: {channel?,channel_id?,attachment_only?,include_pdf?}; recipients: [{id?,email}].
+    schedule_type: hourly/daily/weekly/monthly; hour 0..23; day mon..sun;
+    frame first/mid/last. dashboard_subscription_update: {subscription_id,patch:{name?,
+    archived?,skip_if_empty?,cards?,parameters?,channels?:[{id,enabled?,details?,recipients?,
+    schedule_type?,schedule_hour?,schedule_day?,schedule_frame?}]}}. Channel patches merge
+    by existing id and preserve other channels/details. Archive disables all channels;
+    restore enables all. dashboard_subscription_test: {subscription_id,channel_ids:[id,...]}.
+    Sends once to explicitly selected existing channels even when disabled, without saving.
+    No retry after an uncertain result; delivery_request_accepted proves endpoint acknowledgement
+    only, not recipient delivery. Pulse update/test require a verified superuser for complete
+    API recipient visibility. Pulse reversal uses an explicit update; delivery has no rollback.
     question_batch_trash: {question_ids:[id,...]}; question_batch_restore adds optional
     collection_id or to_root. Bounded exact inventory, per-object reconciliation.
     dashboard_batch_trash/dashboard_batch_restore use dashboard_ids with the same bound.

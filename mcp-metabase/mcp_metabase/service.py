@@ -54,7 +54,18 @@ from mcp_metabase.notifications import (
 )
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
 from mcp_metabase.query_policy import validate_native_preview_sql
-from mcp_metabase.subscriptions import subscription_public
+from mcp_metabase.subscriptions import (
+    PulseCreate,
+    PulsePatch,
+    PulseTest,
+    SubscriptionShapeError,
+    apply_subscription_patch,
+    subscription_create_payload,
+    subscription_created_matches,
+    subscription_public,
+    subscription_test_payload,
+    subscription_update_payload,
+)
 
 COLLECTION_REF_RE = re.compile(r"^(?:root|trash|[1-9][0-9]*|[A-Za-z0-9_-]{21})$")
 MUTATION_RECONCILIATION_ATTEMPTS = 3
@@ -78,6 +89,9 @@ SEARCH_MODELS = frozenset(
 )
 COMPACT_MUTATION_ACTIONS = frozenset(
     {
+        Action.DASHBOARD_SUBSCRIPTION_CREATE,
+        Action.DASHBOARD_SUBSCRIPTION_UPDATE,
+        Action.DASHBOARD_SUBSCRIPTION_TEST,
         Action.TIMELINE_CREATE,
         Action.TIMELINE_ARCHIVE,
         Action.TIMELINE_RESTORE,
@@ -110,6 +124,12 @@ COMPACT_MUTATION_ACTIONS = frozenset(
     }
 )
 COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]] = {
+    Action.DASHBOARD_SUBSCRIPTION_CREATE: (frozenset({"body"}), frozenset()),
+    Action.DASHBOARD_SUBSCRIPTION_UPDATE: (frozenset({"subscription_id", "patch"}), frozenset()),
+    Action.DASHBOARD_SUBSCRIPTION_TEST: (
+        frozenset({"subscription_id", "channel_ids"}),
+        frozenset(),
+    ),
     Action.TIMELINE_CREATE: (frozenset({"body"}), frozenset()),
     Action.TIMELINE_ARCHIVE: (frozenset({"timeline_id"}), frozenset()),
     Action.TIMELINE_RESTORE: (frozenset({"timeline_id"}), frozenset()),
@@ -171,6 +191,18 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.BATCH: (frozenset({"items"}), frozenset()),
 }
 COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
+    Action.DASHBOARD_SUBSCRIPTION_CREATE: (
+        "arguments.body={dashboard_id,name,cards:[{id,dashboard_card_id,include_csv?,include_xls?,"
+        "format_rows?,pivot_results?}],channels:[{channel_type,enabled,details?,recipients?,"
+        "channel_id?,schedule_type,schedule_hour?,schedule_day?,schedule_frame?}],parameters?,skip_if_empty?}"
+    ),
+    Action.DASHBOARD_SUBSCRIPTION_UPDATE: (
+        "arguments={subscription_id,patch:{name?,archived?,skip_if_empty?,cards?,parameters?,"
+        "channels?:[{id,enabled?,details?,recipients?,schedule_type?,schedule_hour?,schedule_day?,schedule_frame?}]}}"
+    ),
+    Action.DASHBOARD_SUBSCRIPTION_TEST: (
+        "arguments={subscription_id,channel_ids:[positive_integer]}"
+    ),
     Action.TIMELINE_CREATE: (
         "arguments.body={name,collection_id:int|null,description?,icon?,default?:bool,archived?:bool}"
     ),
@@ -547,6 +579,7 @@ class MetabaseRuntime:
         if object_type is ObjectType.TIMELINE:
             return self._timeline_inventory_state(object_id)
         paths = {
+            ObjectType.DASHBOARD_SUBSCRIPTION: f"/api/pulse/{object_id}",
             ObjectType.NOTIFICATION: f"/api/notification/{object_id}",
             ObjectType.QUESTION: f"/api/card/{object_id}",
             ObjectType.DASHBOARD: f"/api/dashboard/{object_id}",
@@ -559,8 +592,11 @@ class MetabaseRuntime:
             raise MutationValidationError(
                 f"Metabase {object_type.value} endpoint returned an invalid shape."
             )
-        if object_type is ObjectType.NOTIFICATION and payload.get("id") != object_id:
-            raise MutationValidationError("Notification read violated its exact id binding.")
+        if (
+            object_type in {ObjectType.NOTIFICATION, ObjectType.DASHBOARD_SUBSCRIPTION}
+            and payload.get("id") != object_id
+        ):
+            raise MutationValidationError("Subscription read violated its exact id binding.")
         return payload
 
     def _full_object(self, object_type: ObjectType, object_id: int) -> dict[str, Any]:
@@ -718,6 +754,231 @@ class MetabaseRuntime:
             "upstream_pagination": False,
             "scope": "API-key-visible legacy Pulse; visibility is not instance-wide completeness",
         }
+
+    @staticmethod
+    def _require_pulse_visibility(context: dict[str, Any]) -> None:
+        # Sandboxed/impersonated readers can receive a silently filtered recipient list.
+        if context["user"].get("is_superuser") is not True:
+            raise MutationValidationError(
+                "Pulse update/test require a verified superuser "
+                "for complete API recipient visibility."
+            )
+
+    def _subscription_bindings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        dashboard = self._object_raw(ObjectType.DASHBOARD, payload["dashboard_id"])
+        if dashboard.get("archived") is not False or not isinstance(
+            dashboard.get("dashcards"), list
+        ):
+            raise SubscriptionShapeError(
+                "Pulse requires an unarchived dashboard with complete dashcards."
+            )
+        pairs = [(row["id"], row["dashboard_card_id"]) for row in payload["cards"]]
+        if len(pairs) != len(set(pairs)):
+            raise SubscriptionShapeError("Pulse contains duplicate dashboard card references.")
+        for card_id, dashcard_id in pairs:
+            matches = [
+                row
+                for row in dashboard["dashcards"]
+                if isinstance(row, dict) and row.get("id") == dashcard_id
+            ]
+            if len(matches) != 1 or matches[0].get("card_id") != card_id:
+                raise SubscriptionShapeError(
+                    "Pulse card does not match its exact dashboard dashcard."
+                )
+        dashboard_parameters = dashboard.get("parameters")
+        if not isinstance(dashboard_parameters, list) or any(
+            not isinstance(row, dict) for row in dashboard_parameters
+        ):
+            raise SubscriptionShapeError("Dashboard parameter inventory is incomplete.")
+        parameter_ids = []
+        for parameter in payload["parameters"]:
+            if (
+                not isinstance(parameter, dict)
+                or not isinstance(parameter.get("id"), str)
+                or not parameter["id"]
+            ):
+                raise SubscriptionShapeError("Pulse parameters require string ids.")
+            matches = [row for row in dashboard_parameters if row.get("id") == parameter["id"]]
+            if (
+                len(matches) != 1
+                or not isinstance(parameter.get("type"), str)
+                or parameter["type"] != matches[0].get("type")
+            ):
+                raise SubscriptionShapeError(
+                    "Pulse parameter id/type does not match the dashboard."
+                )
+            parameter_ids.append(parameter["id"])
+        if len(parameter_ids) != len(set(parameter_ids)):
+            raise SubscriptionShapeError("Pulse parameters contain duplicate ids.")
+        questions = []
+        for question_id in sorted({card_id for card_id, _ in pairs}):
+            question = self._object_raw(ObjectType.QUESTION, question_id)
+            if question.get("archived") is not False:
+                raise SubscriptionShapeError("Pulse requires unarchived questions.")
+            questions.append(
+                {
+                    "question_id": question_id,
+                    "state_sha256": object_state_sha256(
+                        project_state(question, ObjectType.QUESTION), ObjectType.QUESTION
+                    ),
+                }
+            )
+        return {
+            "dashboard_id": payload["dashboard_id"],
+            "dashboard_sha256": object_state_sha256(
+                project_state(dashboard, ObjectType.DASHBOARD), ObjectType.DASHBOARD
+            ),
+            "question_bindings": questions,
+        }
+
+    @staticmethod
+    def _subscription_impact(payload: dict[str, Any]) -> dict[str, Any]:
+        # Remove the projection-only placeholder: a create has no subscription id yet.
+        public = subscription_public({"id": 1, "archived": False, **payload}, max_items=100)
+        if "id" not in payload:
+            public.pop("id")
+        for key in ("settings_complete", "projection", "write_supported"):
+            public.pop(key, None)
+        public["skip_if_empty"] = payload["skip_if_empty"]
+        public["parameters"] = [
+            {
+                key: copy.deepcopy(value)
+                for key, value in row.items()
+                if key in {"id", "type", "name", "slug", "value", "default"}
+            }
+            for row in payload["parameters"]
+        ]
+        return public
+
+    def subscription_prepare(self, action: Action, arguments: dict[str, Any]) -> dict[str, Any]:
+        context = self._write_context()
+        if action is not Action.DASHBOARD_SUBSCRIPTION_CREATE:
+            self._require_pulse_visibility(context)
+        before = None
+        try:
+            if action is Action.DASHBOARD_SUBSCRIPTION_CREATE:
+                request = PulseCreate.model_validate(arguments["body"])
+                payload = subscription_create_payload(request)
+                after = copy.deepcopy(payload)
+            else:
+                subscription_id = self._positive_id(arguments["subscription_id"], "subscription_id")
+                raw = self._object_raw(ObjectType.DASHBOARD_SUBSCRIPTION, subscription_id)
+                if raw.get("can_write") is not True:
+                    raise SubscriptionShapeError("Pulse write permission is not confirmed.")
+                before = project_state(raw, ObjectType.DASHBOARD_SUBSCRIPTION)
+                if action is Action.DASHBOARD_SUBSCRIPTION_UPDATE:
+                    request = PulsePatch.model_validate(arguments["patch"])
+                    after = apply_subscription_patch(before, request)
+                    payload = subscription_update_payload(after, request)
+                else:
+                    request = PulseTest.model_validate(arguments)
+                    payload = subscription_test_payload(before, request)
+                    after = None
+            bindings = self._subscription_bindings(after if after is not None else before)
+        except ValidationError as exc:
+            prefix = (
+                "arguments.body"
+                if action is Action.DASHBOARD_SUBSCRIPTION_CREATE
+                else "arguments.patch"
+                if action is Action.DASHBOARD_SUBSCRIPTION_UPDATE
+                else "arguments"
+            )
+            raise self._validation_error(exc, action=action, path_prefix=prefix) from None
+        except SubscriptionShapeError as exc:
+            raise MutationValidationError(str(exc)) from None
+        target = {
+            **bindings,
+            "before": self._subscription_impact(before) if before is not None else None,
+            "after": self._subscription_impact(after if after is not None else payload),
+            "side_effects": (
+                "One immediate test send to exactly the selected channels and recipients; "
+                "does not save settings. Provider acceptance does not prove recipient delivery; "
+                "never retry automatically."
+                if action is Action.DASHBOARD_SUBSCRIPTION_TEST
+                else "Enabled channels can deliver on schedule; archive disables all channels "
+                "and restore enables all."
+            ),
+        }
+        mutation = PlannedMutation(
+            object_type=ObjectType.DASHBOARD_SUBSCRIPTION,
+            object_id=before["id"] if before else None,
+            before_state=before,
+            after_state=after,
+            write_payload=payload,
+            changed_roots=tuple(
+                key for key in after if before is None or before.get(key) != after[key]
+            )
+            if after is not None
+            else (),
+            before_sha256=canonical_sha256(before) if before is not None else None,
+            after_sha256=canonical_sha256(after) if after is not None else None,
+            target=target,
+        )
+        return self._prepare_plan(
+            context=context, action=action, mutations=[mutation], arguments=arguments
+        )
+
+    def _subscription_preflight(self, mutation: PlannedMutation) -> bool:
+        if mutation.object_id is not None:
+            raw = self._object_raw(ObjectType.DASHBOARD_SUBSCRIPTION, mutation.object_id)
+            if raw.get("can_write") is not True:
+                return False
+            if (
+                canonical_sha256(project_state(raw, ObjectType.DASHBOARD_SUBSCRIPTION))
+                != mutation.before_sha256
+            ):
+                return False
+        payload = (
+            mutation.after_state if mutation.after_state is not None else mutation.before_state
+        )
+        bindings = self._subscription_bindings(payload)
+        return all(bindings[key] == mutation.target[key] for key in bindings)
+
+    def _execute_subscription(self, plan: ExactPlan) -> tuple[Outcome, dict[str, Any]]:
+        mutation = plan.mutations[0]
+        empty = {"object_results": [], "applied_indexes": [], "rollback_candidates": []}
+        if not self._subscription_preflight(mutation):
+            return Outcome.REJECTED_STALE, {
+                **empty,
+                "reason": "subscription_or_dashboard_content_changed",
+            }
+        if plan.action is Action.DASHBOARD_SUBSCRIPTION_UPDATE:
+            item = self._apply_update(mutation)
+            outcome = Outcome(item["outcome"])
+            return outcome, {
+                **empty,
+                "object_results": [item],
+                "applied_indexes": [0] if outcome is Outcome.APPLIED_VERIFIED else [],
+                "next_action": "Use dashboard_subscription_update for an explicit reverse change.",
+            }
+        path = (
+            "/api/pulse/test" if plan.action is Action.DASHBOARD_SUBSCRIPTION_TEST else "/api/pulse"
+        )
+        try:
+            response = self.http.post_json(path, mutation.write_payload)
+        except MetabaseApiError as exc:
+            outcome = (
+                Outcome.OUTCOME_UNKNOWN if exc.outcome_unknown else Outcome.REJECTED_VALIDATION
+            )
+            return outcome, {
+                **empty,
+                "http_status": exc.status_code,
+                "write_requests": 1,
+                "automatic_retry": False,
+            }
+        if plan.action is Action.DASHBOARD_SUBSCRIPTION_TEST:
+            accepted = isinstance(response, dict) and response.get("ok") is True
+            return Outcome.DELIVERY_REQUEST_ACCEPTED if accepted else Outcome.OUTCOME_UNKNOWN, {
+                **empty,
+                "verification_scope": "metabase_test_endpoint_acknowledgement_only",
+                "recipient_delivery_verified": False,
+                "write_requests": 1,
+                "automatic_retry": False,
+            }
+        created_id = self._created_id(response)
+        if created_id is None:
+            return Outcome.OUTCOME_UNKNOWN, {**empty, "write_requests": 1, "automatic_retry": False}
+        return self._create_result(mutation, created_id)
 
     def notification_create_prepare(self, body: dict[str, Any]) -> dict[str, Any]:
         context = self._write_context()
@@ -3579,7 +3840,13 @@ class MetabaseRuntime:
 
         selected = self._compact_action(action)
         self._closed_action_arguments(action, selected, arguments)
-        if selected is Action.TIMELINE_CREATE:
+        if selected in {
+            Action.DASHBOARD_SUBSCRIPTION_CREATE,
+            Action.DASHBOARD_SUBSCRIPTION_UPDATE,
+            Action.DASHBOARD_SUBSCRIPTION_TEST,
+        }:
+            result = self.subscription_prepare(selected, arguments)
+        elif selected is Action.TIMELINE_CREATE:
             result = self.timeline_create_prepare(arguments["body"])
         elif selected in {Action.TIMELINE_ARCHIVE, Action.TIMELINE_RESTORE}:
             result = self.timeline_lifecycle_prepare(
@@ -3925,6 +4192,7 @@ class MetabaseRuntime:
         if mutation.object_id is None:
             raise MutationValidationError("Metabase update mutation has no object id.")
         prefixes = {
+            ObjectType.DASHBOARD_SUBSCRIPTION: "pulse",
             ObjectType.TIMELINE: "timeline",
             ObjectType.NOTIFICATION: "notification",
             ObjectType.QUESTION: "card",
@@ -3999,7 +4267,12 @@ class MetabaseRuntime:
                     raise MutationValidationError("Metabase update mutation has no object id.")
                 readback = self._object_raw(mutation.object_type, mutation.object_id)
                 readback_state = project_state(readback, mutation.object_type)
-            except (MetabaseApiError, MutationValidationError, NotificationShapeError):
+            except (
+                MetabaseApiError,
+                MutationValidationError,
+                NotificationShapeError,
+                SubscriptionShapeError,
+            ):
                 last_result = {
                     "object_type": mutation.object_type.value,
                     "object_id": mutation.object_id,
@@ -4426,7 +4699,12 @@ class MetabaseRuntime:
             return raw, object_state_sha256(
                 project_state(raw, mutation.object_type), mutation.object_type
             )
-        except (MetabaseApiError, MutationValidationError, NotificationShapeError):
+        except (
+            MetabaseApiError,
+            MutationValidationError,
+            NotificationShapeError,
+            SubscriptionShapeError,
+        ):
             return None, None
 
     @classmethod
@@ -4468,6 +4746,8 @@ class MetabaseRuntime:
             reconciliation_attempts = attempt
             readback, readback_sha256 = self._created_readback(mutation, created_id)
             matches = readback is not None and self._requested_subset_matches(expected, readback)
+            if readback is not None and mutation.object_type is ObjectType.DASHBOARD_SUBSCRIPTION:
+                matches = subscription_created_matches(expected, readback)
             if matches and mutation.target.get("create_kind") == "dashboard_clone":
                 matches = bool(
                     len(readback.get("dashcards", []) or [])
@@ -4503,7 +4783,9 @@ class MetabaseRuntime:
                 "object_type": mutation.object_type.value,
                 "object_id": created_id,
                 "recommended_action": (
-                    "notification_update(active=false)"
+                    "dashboard_subscription_update(archived=true)"
+                    if mutation.object_type is ObjectType.DASHBOARD_SUBSCRIPTION
+                    else "notification_update(active=false)"
                     if mutation.object_type is ObjectType.NOTIFICATION
                     else "timeline_archive"
                     if mutation.object_type is ObjectType.TIMELINE
@@ -4902,7 +5184,15 @@ class MetabaseRuntime:
                 and context["user"].get("is_superuser") is not True
             ):
                 raise MetabasePolicyError("Collection batch requires complete admin visibility.")
-            if plan.action in update_actions:
+            if plan.action in {
+                Action.DASHBOARD_SUBSCRIPTION_CREATE,
+                Action.DASHBOARD_SUBSCRIPTION_UPDATE,
+                Action.DASHBOARD_SUBSCRIPTION_TEST,
+            }:
+                if plan.action is not Action.DASHBOARD_SUBSCRIPTION_CREATE:
+                    self._require_pulse_visibility(context)
+                outcome, details = self._execute_subscription(plan)
+            elif plan.action in update_actions:
                 outcome, details = self._execute_single_update(plan.mutations[0])
             elif plan.action in {
                 Action.BATCH,
@@ -4934,7 +5224,12 @@ class MetabaseRuntime:
                 "applied_indexes": [],
                 "rollback_candidates": [],
             }
-        except (MetabasePolicyError, MutationValidationError, NotificationShapeError):
+        except (
+            MetabasePolicyError,
+            MutationValidationError,
+            NotificationShapeError,
+            SubscriptionShapeError,
+        ):
             outcome = Outcome.REJECTED_VALIDATION
             details = {
                 "reason": "exact_plan_validation_failed_during_execution",
@@ -4983,6 +5278,11 @@ class MetabaseRuntime:
             if not 0 <= index < len(source.mutations):
                 raise MetabasePolicyError("Source plan applied-mutation index is invalid.")
             source_mutation = source.mutations[index]
+            if source_mutation.object_type is ObjectType.DASHBOARD_SUBSCRIPTION:
+                raise MetabasePolicyError(
+                    "Pulse uses explicit dashboard_subscription_update for reverse changes; "
+                    "test delivery cannot be rolled back."
+                )
             if source_mutation.object_type is ObjectType.TIMELINE:
                 raise MetabasePolicyError(
                     "Timeline lifecycle uses explicit archive/restore; rollback is unavailable "

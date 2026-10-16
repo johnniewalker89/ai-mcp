@@ -10,6 +10,7 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 
 
 class ObjectType(StrEnum):
+    DASHBOARD_SUBSCRIPTION = "dashboard_subscription"
     TIMELINE = "timeline"
     NOTIFICATION = "notification"
     QUESTION = "question"
@@ -20,6 +21,9 @@ class ObjectType(StrEnum):
 
 
 class Action(StrEnum):
+    DASHBOARD_SUBSCRIPTION_CREATE = "dashboard_subscription_create"
+    DASHBOARD_SUBSCRIPTION_UPDATE = "dashboard_subscription_update"
+    DASHBOARD_SUBSCRIPTION_TEST = "dashboard_subscription_test"
     TIMELINE_CREATE = "timeline_create"
     TIMELINE_ARCHIVE = "timeline_archive"
     TIMELINE_RESTORE = "timeline_restore"
@@ -58,6 +62,7 @@ class Action(StrEnum):
 
 
 class Outcome(StrEnum):
+    DELIVERY_REQUEST_ACCEPTED = "delivery_request_accepted"
     APPLIED_VERIFIED = "applied_verified"
     NOT_APPLIED_VERIFIED = "not_applied_verified"
     REJECTED_VALIDATION = "rejected_validation"
