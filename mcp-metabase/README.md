@@ -102,6 +102,7 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 | --- | --- | --- |
 | `METABASE_BASE_URL` | Точный HTTPS-адрес Metabase | обязательна |
 | `METABASE_API_KEY` | API key пользователя Metabase | обязательна |
+| `METABASE_MCP_VERIFY_TLS` | Проверять HTTPS-сертификат и hostname; строгий bool true/false | `true` |
 | `METABASE_MCP_EXPECTED_USER_ID` | Дополнительная проверка владельца key | не задана |
 | `METABASE_MCP_SOURCE_REVISION` | Commit SHA установленной версии MCP | `unreported` |
 | `METABASE_MCP_SUPPORTED_VERSION_PREFIXES` | Проверенные версии Metabase | `v0.63.,0.63.` |
@@ -112,6 +113,10 @@ METABASE_MCP_SOURCE_REVISION = "<COMMIT_SHA>"
 
 Остальные лимиты перечислены в [`metabase.env.example`](metabase.env.example); обычно
 их менять не требуется. Для каждого человека лучше выпускать отдельный API key.
+
+Для отдельного dev/test с несовпадающим или недоверенным сертификатом явно задай
+`METABASE_MCP_VERIFY_TLS = "false"` в env только этого инстанса. По умолчанию
+проверка включена; настройка не меняет HTTPS-origin, права, approvals или retry.
 
 ### Подтверждения
 

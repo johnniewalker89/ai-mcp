@@ -57,6 +57,7 @@ class MetabaseHttpClient:
             },
             timeout=httpx.Timeout(config.request_timeout_seconds),
             follow_redirects=False,
+            verify=config.verify_tls,
             transport=transport,
         )
 

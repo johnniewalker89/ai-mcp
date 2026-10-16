@@ -83,6 +83,7 @@ class MetabaseConfig:
     max_active_edit_sessions: int = 20
     request_timeout_seconds: float = 30.0
     read_attempts: int = 2
+    verify_tls: bool = True
 
     @property
     def origin(self) -> str:
@@ -189,6 +190,7 @@ class MetabaseConfig:
                 "METABASE_MCP_REQUEST_TIMEOUT_SECONDS", 30.0, 1.0, 120.0
             ),
             read_attempts=_positive_int("METABASE_MCP_READ_ATTEMPTS", 2, 1, 3),
+            verify_tls=_boolean("METABASE_MCP_VERIFY_TLS", default=True),
         )
 
     def version_supported(self, version: str | None) -> bool:
