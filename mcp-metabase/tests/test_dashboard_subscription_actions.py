@@ -296,6 +296,20 @@ def test_hidden_cards_cannot_be_activated_or_sent(runtime, action):
     assert runtime.http.sent == []
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"archived": True, "cards": [{"id": 999, "dashboard_card_id": 201}]},
+        {"archived": True, "parameters": [{"id": "unknown", "type": "string/="}]},
+    ],
+)
+def test_archive_flag_does_not_bypass_replacement_content_validation(runtime, patch):
+    """Совмещение архивации с заменой карточек или фильтров сохраняет строгую проверку."""
+    with pytest.raises(MutationValidationError):
+        update(runtime, patch)
+    assert runtime.http.sent == []
+
+
 def test_rename_does_not_round_trip_inventories_hidden_by_pulse_get(runtime):
     result = execute(runtime, update(runtime, {"name": "Renamed"}))
     assert result["outcome"] == "applied_verified"

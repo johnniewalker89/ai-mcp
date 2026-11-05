@@ -764,8 +764,10 @@ class MetabaseRuntime:
                 "for complete API recipient visibility."
             )
 
-    def _subscription_bindings(self, payload: dict[str, Any], action: Action) -> dict[str, Any]:
-        """Связывает состояние дашборда с действием; выключение не требует живых карточек."""
+    def _subscription_bindings(
+        self, payload: dict[str, Any], action: Action, write_payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Связывает снимок и фактическое тело записи; чистая архивация не меняет содержимое."""
         dashboard = self._object_raw(ObjectType.DASHBOARD, payload["dashboard_id"])
         bindings = {
             "dashboard_id": payload["dashboard_id"],
@@ -774,7 +776,11 @@ class MetabaseRuntime:
             ),
             "question_bindings": [],
         }
-        if action is Action.DASHBOARD_SUBSCRIPTION_UPDATE and payload["archived"] is True:
+        if (
+            action is Action.DASHBOARD_SUBSCRIPTION_UPDATE
+            and payload["archived"] is True
+            and write_payload.keys() <= {"archived", "skip_if_empty"}
+        ):
             return bindings
         if not payload["cards"]:
             raise SubscriptionShapeError("Pulse delivery requires at least one visible card.")
@@ -882,7 +888,9 @@ class MetabaseRuntime:
                     request = PulseTest.model_validate(arguments)
                     payload = subscription_test_payload(before, request)
                     after = None
-            bindings = self._subscription_bindings(after if after is not None else before, action)
+            bindings = self._subscription_bindings(
+                after if after is not None else before, action, payload
+            )
         except ValidationError as exc:
             prefix = (
                 "arguments.body"
@@ -940,7 +948,7 @@ class MetabaseRuntime:
         payload = (
             mutation.after_state if mutation.after_state is not None else mutation.before_state
         )
-        bindings = self._subscription_bindings(payload, action)
+        bindings = self._subscription_bindings(payload, action, mutation.write_payload)
         return all(bindings[key] == mutation.target[key] for key in bindings)
 
     def _execute_subscription(self, plan: ExactPlan) -> tuple[Outcome, dict[str, Any]]:
