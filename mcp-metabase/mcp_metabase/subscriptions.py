@@ -230,7 +230,7 @@ def _canonical_channel(raw: dict[str, Any], *, saved: bool) -> dict[str, Any]:
 
 
 def subscription_state(raw: dict[str, Any]) -> dict[str, Any]:
-    """Private write snapshot; never use the public settings projection as a PUT body."""
+    """Сохраняет полный снимок Pulse; GET может скрывать все архивные карточки."""
     for key in ("id", "dashboard_id"):
         if type(raw.get(key)) is not int or raw[key] <= 0:
             raise SubscriptionShapeError(f"Pulse has no positive {key} binding.")
@@ -242,8 +242,8 @@ def subscription_state(raw: dict[str, Any]) -> dict[str, Any]:
     for key in ("cards", "channels", "parameters"):
         if not isinstance(raw.get(key), list) or len(raw[key]) > 100:
             raise SubscriptionShapeError(f"Pulse {key} is not a complete bounded array.")
-    if not raw["cards"] or not raw["channels"]:
-        raise SubscriptionShapeError("Pulse cards/channels cannot be empty.")
+    if not raw["channels"]:
+        raise SubscriptionShapeError("Pulse channels cannot be empty.")
     state = {
         key: copy.deepcopy(raw[key])
         for key in ("id", "dashboard_id", "name", "archived", "skip_if_empty", "parameters")

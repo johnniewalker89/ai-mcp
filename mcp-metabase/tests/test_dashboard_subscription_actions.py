@@ -242,6 +242,60 @@ def test_archive_and_restore_match_server_hook_without_channel_override(runtime)
     assert all(row["enabled"] is True for row in runtime.http.pulses[70]["channels"])
 
 
+@pytest.mark.parametrize("response", ["normal", "lost", "ignored"])
+def test_archive_hidden_cards_on_archived_dashboard_preserves_inventory(runtime, response):
+    """Архивация скрытых карточек проходит execute/readback без подмены списков."""
+    runtime.http.pulses[70]["cards"] = []
+    runtime.http.dashboards[10]["archived"] = True
+    before = copy.deepcopy(runtime.http.pulses[70])
+    plan = update(runtime, {"archived": True})
+    assert plan["impact"][0]["target"]["question_bindings"] == []
+    runtime.http.lost_response = response == "lost"
+    runtime.http.update_ignored = response == "ignored"
+    result = execute(runtime, plan)
+    assert result["outcome"] == (
+        "not_applied_verified" if response == "ignored" else "applied_verified"
+    )
+    assert runtime.http.sent == [("/api/pulse/70", {"archived": True, "skip_if_empty": True})]
+    assert runtime.http.put_calls == 1
+    after = runtime.http.pulses[70]
+    assert after["cards"] == [] and after["parameters"] == before["parameters"]
+    assert after["future_root"] == before["future_root"]
+    before_channels = {row["id"]: row for row in before["channels"]}
+    for row in after["channels"]:
+        expected = copy.deepcopy(before_channels[row["id"]])
+        if response != "ignored":
+            expected["enabled"] = False
+        assert row == expected
+
+
+def test_archive_hidden_cards_keeps_dashboard_drift_guard(runtime):
+    """Изменение архивного дашборда после prepare останавливает запись."""
+    runtime.http.pulses[70]["cards"] = []
+    runtime.http.dashboards[10]["archived"] = True
+    plan = update(runtime, {"archived": True})
+    runtime.http.dashboards[10]["name"] = "Concurrent edit"
+    assert execute(runtime, plan)["outcome"] == "rejected_stale"
+    assert runtime.http.sent == []
+
+
+@pytest.mark.parametrize("action", ["restore", "test"])
+def test_hidden_cards_cannot_be_activated_or_sent(runtime, action):
+    """Пустой видимый список допустим для архивации, но не включения или отправки."""
+    runtime.http.pulses[70]["cards"] = []
+    runtime.http.pulses[70]["archived"] = True
+    for row in runtime.http.pulses[70]["channels"]:
+        row["enabled"] = False
+    with pytest.raises(MutationValidationError, match="at least one visible card"):
+        if action == "restore":
+            update(runtime, {"archived": False})
+        else:
+            runtime.action_prepare(
+                "dashboard_subscription_test", {"subscription_id": 70, "channel_ids": [71]}
+            )
+    assert runtime.http.sent == []
+
+
 def test_rename_does_not_round_trip_inventories_hidden_by_pulse_get(runtime):
     result = execute(runtime, update(runtime, {"name": "Renamed"}))
     assert result["outcome"] == "applied_verified"

@@ -764,8 +764,20 @@ class MetabaseRuntime:
                 "for complete API recipient visibility."
             )
 
-    def _subscription_bindings(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _subscription_bindings(self, payload: dict[str, Any], action: Action) -> dict[str, Any]:
+        """Связывает состояние дашборда с действием; выключение не требует живых карточек."""
         dashboard = self._object_raw(ObjectType.DASHBOARD, payload["dashboard_id"])
+        bindings = {
+            "dashboard_id": payload["dashboard_id"],
+            "dashboard_sha256": object_state_sha256(
+                project_state(dashboard, ObjectType.DASHBOARD), ObjectType.DASHBOARD
+            ),
+            "question_bindings": [],
+        }
+        if action is Action.DASHBOARD_SUBSCRIPTION_UPDATE and payload["archived"] is True:
+            return bindings
+        if not payload["cards"]:
+            raise SubscriptionShapeError("Pulse delivery requires at least one visible card.")
         if dashboard.get("archived") is not False or not isinstance(
             dashboard.get("dashcards"), list
         ):
@@ -823,13 +835,8 @@ class MetabaseRuntime:
                     ),
                 }
             )
-        return {
-            "dashboard_id": payload["dashboard_id"],
-            "dashboard_sha256": object_state_sha256(
-                project_state(dashboard, ObjectType.DASHBOARD), ObjectType.DASHBOARD
-            ),
-            "question_bindings": questions,
-        }
+        bindings["question_bindings"] = questions
+        return bindings
 
     @staticmethod
     def _subscription_impact(payload: dict[str, Any]) -> dict[str, Any]:
@@ -851,6 +858,7 @@ class MetabaseRuntime:
         return public
 
     def subscription_prepare(self, action: Action, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Готовит точный план создания, изменения или тестовой отправки подписки."""
         context = self._write_context()
         if action is not Action.DASHBOARD_SUBSCRIPTION_CREATE:
             self._require_pulse_visibility(context)
@@ -874,7 +882,7 @@ class MetabaseRuntime:
                     request = PulseTest.model_validate(arguments)
                     payload = subscription_test_payload(before, request)
                     after = None
-            bindings = self._subscription_bindings(after if after is not None else before)
+            bindings = self._subscription_bindings(after if after is not None else before, action)
         except ValidationError as exc:
             prefix = (
                 "arguments.body"
@@ -918,7 +926,8 @@ class MetabaseRuntime:
             context=context, action=action, mutations=[mutation], arguments=arguments
         )
 
-    def _subscription_preflight(self, mutation: PlannedMutation) -> bool:
+    def _subscription_preflight(self, mutation: PlannedMutation, action: Action) -> bool:
+        """Повторно сверяет Pulse и привязки выбранного действия перед записью."""
         if mutation.object_id is not None:
             raw = self._object_raw(ObjectType.DASHBOARD_SUBSCRIPTION, mutation.object_id)
             if raw.get("can_write") is not True:
@@ -931,13 +940,14 @@ class MetabaseRuntime:
         payload = (
             mutation.after_state if mutation.after_state is not None else mutation.before_state
         )
-        bindings = self._subscription_bindings(payload)
+        bindings = self._subscription_bindings(payload, action)
         return all(bindings[key] == mutation.target[key] for key in bindings)
 
     def _execute_subscription(self, plan: ExactPlan) -> tuple[Outcome, dict[str, Any]]:
+        """Исполняет план подписки после проверки его актуальности и выбранного действия."""
         mutation = plan.mutations[0]
         empty = {"object_results": [], "applied_indexes": [], "rollback_candidates": []}
-        if not self._subscription_preflight(mutation):
+        if not self._subscription_preflight(mutation, plan.action):
             return Outcome.REJECTED_STALE, {
                 **empty,
                 "reason": "subscription_or_dashboard_content_changed",
