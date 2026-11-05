@@ -277,6 +277,10 @@ class MetabaseHttpClient:
             byte_limit=self.config.max_query_bytes,
         )
 
+    def get_json_once(self, path: str) -> Any:
+        """Выполняет GET с возможными побочными эффектами без автоматического повтора."""
+        return self._request_json("GET", path, mutation=True)
+
     def post_json(self, path: str, body: dict[str, Any]) -> Any:
         return self._request_json("POST", path, body=body, mutation=True)
 

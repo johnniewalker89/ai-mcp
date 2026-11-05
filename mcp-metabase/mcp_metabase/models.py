@@ -10,6 +10,9 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 
 
 class ObjectType(StrEnum):
+    """Типы объектов, которые связываются с точным планом Metabase."""
+
+    SLACK_CONNECTION = "slack_connection"
     DASHBOARD_SUBSCRIPTION = "dashboard_subscription"
     TIMELINE = "timeline"
     NOTIFICATION = "notification"
@@ -21,6 +24,9 @@ class ObjectType(StrEnum):
 
 
 class Action(StrEnum):
+    """Закрытые действия с собственными проверками и правилами исполнения."""
+
+    SLACK_STATUS_REFRESH = "slack_status_refresh"
     DASHBOARD_SUBSCRIPTION_CREATE = "dashboard_subscription_create"
     DASHBOARD_SUBSCRIPTION_UPDATE = "dashboard_subscription_update"
     DASHBOARD_SUBSCRIPTION_TEST = "dashboard_subscription_test"

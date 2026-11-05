@@ -54,6 +54,13 @@ from mcp_metabase.notifications import (
 )
 from mcp_metabase.plans import ExactPlanStore, MetabasePolicyError
 from mcp_metabase.query_policy import validate_native_preview_sql
+from mcp_metabase.slack_connection import (
+    SLACK_APP_INFO_PATH,
+    SLACK_VALID_KEY,
+    SLACK_VALID_PATH,
+    app_identity,
+    indicator_state,
+)
 from mcp_metabase.subscriptions import (
     PulseCreate,
     PulsePatch,
@@ -89,6 +96,7 @@ SEARCH_MODELS = frozenset(
 )
 COMPACT_MUTATION_ACTIONS = frozenset(
     {
+        Action.SLACK_STATUS_REFRESH,
         Action.DASHBOARD_SUBSCRIPTION_CREATE,
         Action.DASHBOARD_SUBSCRIPTION_UPDATE,
         Action.DASHBOARD_SUBSCRIPTION_TEST,
@@ -124,6 +132,7 @@ COMPACT_MUTATION_ACTIONS = frozenset(
     }
 )
 COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]] = {
+    Action.SLACK_STATUS_REFRESH: (frozenset(), frozenset()),
     Action.DASHBOARD_SUBSCRIPTION_CREATE: (frozenset({"body"}), frozenset()),
     Action.DASHBOARD_SUBSCRIPTION_UPDATE: (frozenset({"subscription_id", "patch"}), frozenset()),
     Action.DASHBOARD_SUBSCRIPTION_TEST: (
@@ -191,6 +200,7 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
     Action.BATCH: (frozenset({"items"}), frozenset()),
 }
 COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
+    Action.SLACK_STATUS_REFRESH: "arguments={}",
     Action.DASHBOARD_SUBSCRIPTION_CREATE: (
         "arguments.body={dashboard_id,name,cards:[{id,dashboard_card_id,include_csv?,include_xls?,"
         "format_rows?,pivot_results?}],channels:[{channel_type,enabled,details?,recipients?,"
@@ -460,6 +470,147 @@ class MetabaseRuntime:
         if not context["identity_verified"] or not context["identity_marker"]:
             raise MetabasePolicyError("Metabase API-key subject identity could not be verified.")
         return context
+
+    @staticmethod
+    def _require_slack_settings_admin(context: dict[str, Any]) -> None:
+        """Допускает работу с Slack-индикатором только подтверждённому superuser."""
+        if context["user"].get("is_superuser") is not True:
+            raise MetabasePolicyError("Slack status refresh requires a verified superuser.")
+
+    def _slack_indicator(self) -> dict[str, bool | None]:
+        """Читает только один индикатор, не запрашивая токен или весь список настроек."""
+        return indicator_state(self.http.get_json(SLACK_VALID_PATH))
+
+    def slack_status_refresh_prepare(self) -> dict[str, Any]:
+        """Связывает индикатор с планом; живая auth-проверка остаётся до записи в execute."""
+        context = self._write_context()
+        self._require_slack_settings_admin(context)
+        before = self._slack_indicator()
+        after = {SLACK_VALID_KEY: True}
+        mutation = PlannedMutation(
+            object_type=ObjectType.SLACK_CONNECTION,
+            object_id=None,
+            before_state=before,
+            after_state=after,
+            write_payload={"value": True},
+            changed_roots=() if before == after else (SLACK_VALID_KEY,),
+            before_sha256=canonical_sha256(before),
+            after_sha256=canonical_sha256(after),
+            target={
+                "setting": SLACK_VALID_KEY,
+                "before": before,
+                "after": after,
+                "connection_scope": "current Metabase-configured integration at execution",
+                "validation_phase": "execute before the single indicator PUT",
+                "validation_scope": (
+                    "Metabase app-info confirms auth.test and bots.info; no delivery test"
+                ),
+                "side_effects": (
+                    "Prepare only reads the indicator. Execute calls Metabase app-info once; "
+                    "its native auth-error handler may set the indicator false and notify admins. "
+                    "Only successful app/team validation permits the single true update. "
+                    "No token, URL or other setting is read or changed; no message is sent by MCP."
+                ),
+            },
+        )
+        return self._prepare_plan(
+            context=context,
+            action=Action.SLACK_STATUS_REFRESH,
+            mutations=[mutation],
+            arguments={},
+        )
+
+    def _execute_slack_status_refresh(
+        self, plan: ExactPlan, context: dict[str, Any]
+    ) -> tuple[Outcome, dict[str, Any]]:
+        """Проверяет текущее подключение и один раз сохраняет true с независимым readback."""
+        self._require_slack_settings_admin(context)
+        mutation = plan.mutations[0]
+        details = {
+            "object_results": [],
+            "applied_indexes": [],
+            "rollback_candidates": [],
+            "write_requests": 0,
+            "validation_requests": 0,
+            "automatic_retry": False,
+        }
+        before = self._slack_indicator()
+        if canonical_sha256(before) != mutation.before_sha256:
+            return Outcome.REJECTED_STALE, {**details, "reason": "slack_indicator_changed"}
+        details["validation_requests"] = 1
+        try:
+            raw = self.http.get_json_once(SLACK_APP_INFO_PATH)
+        except MetabaseApiError as exc:
+            return (
+                Outcome.OUTCOME_UNKNOWN if exc.outcome_unknown else Outcome.REJECTED_VALIDATION,
+                {
+                    **details,
+                    "reason": "slack_connection_check_failed",
+                    "http_status": exc.status_code,
+                },
+            )
+        try:
+            identity = app_identity(raw)
+        except MutationValidationError:
+            try:
+                observed = self._slack_indicator()
+            except (MetabaseApiError, MutationValidationError):
+                return Outcome.OUTCOME_UNKNOWN, {
+                    **details,
+                    "reason": "slack_validation_failed_readback_unavailable",
+                }
+            return Outcome.REJECTED_VALIDATION, {
+                **details,
+                "reason": "slack_authentication_not_confirmed",
+                "indicator_readback": observed,
+                "native_auth_handler_changed_indicator": observed != before,
+            }
+        current = self._slack_indicator()
+        if current != before:
+            return Outcome.REJECTED_STALE, {
+                **details,
+                "reason": "slack_indicator_changed_during_validation",
+            }
+        details.update(write_requests=1, validated_connection=identity)
+        try:
+            self.http.put_json(SLACK_VALID_PATH, mutation.write_payload)
+        except MetabaseApiError as exc:
+            if not exc.outcome_unknown:
+                return Outcome.REJECTED_VALIDATION, {
+                    **details,
+                    "reason": "slack_indicator_update_rejected",
+                    "http_status": exc.status_code,
+                }
+        try:
+            observed = self._slack_indicator()
+        except (MetabaseApiError, MutationValidationError):
+            return Outcome.OUTCOME_UNKNOWN, {
+                **details,
+                "reason": "slack_indicator_readback_unavailable",
+            }
+        observed_hash = canonical_sha256(observed)
+        if observed_hash == mutation.after_sha256:
+            mutation.verified_after_state = observed
+            mutation.verified_after_sha256 = observed_hash
+            return Outcome.APPLIED_VERIFIED, {
+                **details,
+                "indicator_readback": observed,
+                "applied_indexes": [0],
+                "object_results": [
+                    {
+                        "object_type": ObjectType.SLACK_CONNECTION.value,
+                        "object_id": None,
+                        "outcome": Outcome.APPLIED_VERIFIED.value,
+                        "verified_after_sha256": observed_hash,
+                    }
+                ],
+            }
+        return (
+            Outcome.NOT_APPLIED_VERIFIED
+            if observed_hash == mutation.before_sha256
+            else Outcome.OUTCOME_UNKNOWN,
+            {**details, "indicator_readback": observed},
+        )
 
     @staticmethod
     def _list_payload(payload: Any) -> tuple[list[dict[str, Any]], int | None]:
@@ -3854,11 +4005,13 @@ class MetabaseRuntime:
         return action
 
     def action_prepare(self, action: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Prepare any supported typed mutation through one compact dispatcher."""
+        """Готовит выбранное закрытое действие через общий компактный dispatcher."""
 
         selected = self._compact_action(action)
         self._closed_action_arguments(action, selected, arguments)
-        if selected in {
+        if selected is Action.SLACK_STATUS_REFRESH:
+            result = self.slack_status_refresh_prepare()
+        elif selected in {
             Action.DASHBOARD_SUBSCRIPTION_CREATE,
             Action.DASHBOARD_SUBSCRIPTION_UPDATE,
             Action.DASHBOARD_SUBSCRIPTION_TEST,
@@ -3982,7 +4135,7 @@ class MetabaseRuntime:
         *,
         open_session: bool = True,
     ) -> dict[str, Any]:
-        """Execute one compact typed plan and open a work session when unambiguous."""
+        """Исполняет точный план; для поддержанного контента открывает связанную сессию."""
 
         plan = self.plans.peek(plan_id)
         if plan.action not in COMPACT_MUTATION_ACTIONS:
@@ -3997,6 +4150,7 @@ class MetabaseRuntime:
         if not open_session or result.get("outcome") != Outcome.APPLIED_VERIFIED.value:
             return result
         if plan.action in {
+            Action.SLACK_STATUS_REFRESH,
             Action.QUESTION_BATCH_TRASH,
             Action.QUESTION_BATCH_RESTORE,
             Action.DASHBOARD_BATCH_TRASH,
@@ -5094,6 +5248,7 @@ class MetabaseRuntime:
         *,
         expected_actions: set[Action] | frozenset[Action] | None = None,
     ) -> dict[str, Any]:
+        """Сверяет identity/version/expiry и исполняет один связанный с ними план."""
         plan = self.plans.peek(plan_id)
         if expected_actions is not None and plan.action not in expected_actions:
             raise MetabasePolicyError(
@@ -5202,7 +5357,9 @@ class MetabaseRuntime:
                 and context["user"].get("is_superuser") is not True
             ):
                 raise MetabasePolicyError("Collection batch requires complete admin visibility.")
-            if plan.action in {
+            if plan.action is Action.SLACK_STATUS_REFRESH:
+                outcome, details = self._execute_slack_status_refresh(plan, context)
+            elif plan.action in {
                 Action.DASHBOARD_SUBSCRIPTION_CREATE,
                 Action.DASHBOARD_SUBSCRIPTION_UPDATE,
                 Action.DASHBOARD_SUBSCRIPTION_TEST,
@@ -5271,6 +5428,7 @@ class MetabaseRuntime:
         )
 
     def rollback_prepare(self, source_plan_id: str) -> dict[str, Any]:
+        """Готовит откат только для типов, у которых предусмотрен безопасный reverse action."""
         context = self._write_context()
         source = self.plans.completed(source_plan_id)
         if source.server_version != context.get("version"):
@@ -5296,6 +5454,10 @@ class MetabaseRuntime:
             if not 0 <= index < len(source.mutations):
                 raise MetabasePolicyError("Source plan applied-mutation index is invalid.")
             source_mutation = source.mutations[index]
+            if source_mutation.object_type is ObjectType.SLACK_CONNECTION:
+                raise MetabasePolicyError(
+                    "Slack validation has no automatic rollback; retain native auth-error status."
+                )
             if source_mutation.object_type is ObjectType.DASHBOARD_SUBSCRIPTION:
                 raise MetabasePolicyError(
                     "Pulse uses explicit dashboard_subscription_update for reverse changes; "

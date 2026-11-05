@@ -19,6 +19,7 @@ logger = logging.getLogger(MCP_SERVER_NAME)
 mcp = FastMCP(name=MCP_SERVER_NAME)
 _RUNTIME: MetabaseRuntime | None = None
 CompactActionName = Literal[
+    "slack_status_refresh",
     "dashboard_subscription_create",
     "dashboard_subscription_update",
     "dashboard_subscription_test",
@@ -765,6 +766,12 @@ def metabase_action_prepare(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Prepare one exact action without writing; ordinary creates use arguments.body.
+
+    slack_status_refresh: arguments={}. Prepare reads only slack-token-valid?.
+    Execute validates the current configured connection through Metabase app-info
+    (auth.test/bots.info), then updates only that indicator to true and reads it back.
+    HTTP200 with null app/team is invalid. Native auth errors may reset the flag
+    and notify admins. No tokens, settings URL, messages, restart or automatic retry.
 
     timeline_create: body {name,collection_id:int|null,description?,icon?,default?,archived?};
     timeline_archive/timeline_restore: {timeline_id}; cascades to ALL bound events.

@@ -256,6 +256,20 @@ Channel credentials, hydrated cards/users и неизвестные blobs не �
 
 Через `metabase_action_prepare` / `metabase_action_execute` доступны:
 
+- `slack_status_refresh`: `arguments={}`. Подготовка читает только текущий
+  `slack-token-valid?` (boolean или null); токен и список настроек не запрашиваются.
+  После exact approval execute вызывает `/api/slack/app-info` из самой Metabase:
+  непустые `app_id` и `team_id` подтверждают `auth.test`/`bots.info`; HTTP200 с
+  null-полями успехом не считается. Затем один PUT сохраняет только этот индикатор
+  в true и отдельный GET подтверждает значение. Остальные настройки и подписки
+  не меняются; токен/URL не передаются, тестовых сообщений и restart нет.
+  Живая проверка выполняется только в execute: штатный обработчик auth-ошибок
+  Metabase сам может сбросить индикатор в false и уведомить администраторов.
+  Этот механизм сохраняется. Индикатор повторно проверяется перед записью;
+  identity/version/expiry/state bindings обязательны. Побочный GET и PUT не
+  повторяются автоматически, потерянный ответ PUT сверяется только readback.
+  Автоматический rollback не поддержан. Действие требует verified superuser;
+  подтверждает авторизацию подключения, а не доставку сообщений или все scopes.
 - `dashboard_subscription_create`: `arguments.body={dashboard_id,name,cards,channels,
   parameters?,skip_if_empty?}` → `POST /api/pulse`. Каждая карточка —
   `{id,dashboard_card_id,include_csv?,include_xls?,format_rows?,pivot_results?}`;
