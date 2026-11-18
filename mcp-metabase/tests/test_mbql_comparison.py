@@ -13,6 +13,7 @@ runtime = lifecycle_fixture
 
 
 def complex_query():
+    """Возвращает MBQL-запрос с типизированным соединением и вложенной стадией."""
     return {
         "lib/type": "mbql/query",
         "database": 50,
@@ -37,6 +38,8 @@ def complex_query():
                 ],
                 "joins": [
                     {
+                        "lib/type": "mbql/join",
+                        "lib/options": {"lib/uuid": "join-id"},
                         "alias": "joined",
                         "conditions": [["=", {"lib/uuid": "join-condition"}, 1, 1]],
                         "stages": [
@@ -92,11 +95,14 @@ def renamed_ids(value, suffix):
 
 
 def test_complex_clause_uuid_renaming_preserves_query_and_payload():
+    """Проверяет эквивалентность при смене UUID, включая опции соединения."""
     before = complex_query()
     after = renamed_ids(before, "-new")
     untouched = copy.deepcopy((before, after))
     assert dataset_query_semantically_matches(before, after)
     assert (before, after) == untouched
+    del after["stages"][0]["joins"][0]["lib/options"]
+    assert dataset_query_semantically_matches(before, after)
 
 
 def test_mbql_field_conversion_marker_can_disappear_but_type_cannot_change():
@@ -120,6 +126,7 @@ def test_mbql_field_conversion_marker_can_disappear_but_type_cannot_change():
         "field",
         "name",
         "alias",
+        "join-option",
         "type",
         "stage",
         "unknown",
@@ -128,6 +135,7 @@ def test_mbql_field_conversion_marker_can_disappear_but_type_cannot_change():
     ],
 )
 def test_complex_clause_uuid_renaming_keeps_real_changes_bound(change):
+    """Проверяет, что после смены UUID отличия change по-прежнему видны."""
     before = complex_query()
     before["stages"][0]["filters"].append(
         ["value", {"lib/uuid": "value"}, ["sum", {"lib/uuid": "literal-id"}, 1]]
@@ -149,6 +157,8 @@ def test_complex_clause_uuid_renaming_keeps_real_changes_bound(change):
         after["stages"][1]["expressions"][0][1]["lib/expression-name"] = "different"
     elif change == "alias":
         stage["joins"][0]["alias"] = "other"
+    elif change == "join-option":
+        stage["joins"][0]["lib/options"]["extra"] = "changed"
     elif change == "type":
         stage["aggregation"][0][2][1]["base-type"] = "type/Text"
     elif change == "stage":
@@ -204,3 +214,21 @@ def test_complete_batch100_with_volatile_aggregation_filter_and_expression_ids(
         assert result["outcome"] == "applied_verified" and len(result["applied_indexes"]) == 100
     assert fake.put_calls == 200 and all(not c["archived"] for c in fake.cards.values())
     assert all(c["dataset_query"] == complex_query() for c in fake.cards.values())
+
+
+def test_batch_preflight_rejects_changed_join_condition(runtime):
+    """Останавливает весь пакет при изменении условия соединения до записи."""
+    service, fake = runtime
+    for card in fake.cards.values():
+        card["dataset_query"] = complex_query()
+    plan = service.action_prepare("question_batch_trash", {"question_ids": [1, 2]})
+
+    changed_query = renamed_ids(fake.cards[2]["dataset_query"], "-read")
+    changed_query["stages"][0]["joins"][0]["conditions"][0][-1] = 2
+    fake.cards[2]["dataset_query"] = changed_query
+
+    result = execute(service, plan)
+    assert result["outcome"] == "rejected_stale"
+    assert result["object_results"][0]["object_id"] == 2
+    assert result["object_results"][0]["stale_diagnostic"]["changed_roots"] == ["dataset_query"]
+    assert fake.put_calls == 0

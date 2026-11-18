@@ -233,6 +233,7 @@ def _mbql_clause_comparison(value: Any, aggregation_ids: dict[str, int]) -> None
 
 
 def _mbql_stage_comparison(stage: Any) -> None:
+    """Убирает служебные идентификаторы из копии MBQL-стадии для сравнения."""
     if not isinstance(stage, dict) or stage.get("lib/type") != "mbql.stage/mbql":
         return
     aggregations = stage.get("aggregation")
@@ -253,6 +254,11 @@ def _mbql_stage_comparison(stage: Any) -> None:
     for join in joins if isinstance(joins, list) else []:
         if not isinstance(join, dict):
             continue
+        options = join.get("lib/options")
+        if join.get("lib/type") == "mbql/join" and isinstance(options, dict):
+            options.pop("lib/uuid", None)
+            if not options:
+                del join["lib/options"]
         for root in ("conditions", "fields"):
             _mbql_clause_comparison(join.get(root), ids)
         nested = join.get("stages")
