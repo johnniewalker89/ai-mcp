@@ -1334,6 +1334,7 @@ def _protected_root_semantically_matches(
 
 
 def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> bool:
+    """Сверяет результат записи с ожидаемыми полями и защищённым состоянием объекта."""
     if mutation.after_state is None or mutation.object_id is None:
         return False
     readback = project_state(raw_readback, mutation.object_type)
@@ -1348,6 +1349,12 @@ def verify_mutation(mutation: PlannedMutation, raw_readback: dict[str, Any]) -> 
     roots = set(mutation.changed_roots) | (
         set(PROTECTED_ROOTS.get(mutation.object_type, frozenset())) - set(mutation.changed_roots)
     )
+    if mutation.object_type is ObjectType.QUESTION and "source_dashboard" in mutation.target:
+        if readback.get("archived") is not False or not {"dashboard_id", "collection_id"}.issubset(
+            readback
+        ):
+            return False
+        roots.update({"collection_id", "entity_id", "name", "description", "display", "type"})
     return all(_protected_root_semantically_matches(mutation, readback, root) for root in roots)
 
 

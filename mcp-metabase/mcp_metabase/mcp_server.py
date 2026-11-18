@@ -37,6 +37,7 @@ CompactActionName = Literal[
     "question_create",
     "question_copy",
     "question_update",
+    "question_detach",
     "question_delete",
     "question_restore",
     "dashboard_create",
@@ -799,6 +800,9 @@ def metabase_action_prepare(
     API recipient visibility. Pulse reversal uses an explicit update; delivery has no rollback.
     question_batch_trash: {question_ids:[id,...]}; question_batch_restore adds optional
     collection_id or to_root. Bounded exact inventory, per-object reconciliation.
+    question_detach: {question_id,dashboard_id}; move the existing active question
+    to its dashboard's collection, keeping the question id and dashboard tiles.
+    Dashboard archival uses a separate exact plan.
     dashboard_batch_trash/dashboard_batch_restore use dashboard_ids with the same bound.
     collection_batch_trash: {collection_ids:[id,...],empty_only?:bool}; restore adds
     parent_id or to_root instead of empty_only. Exact complete trees; overlaps collapse

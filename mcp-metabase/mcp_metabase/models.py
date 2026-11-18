@@ -44,6 +44,7 @@ class Action(StrEnum):
     COLLECTION_BATCH_RESTORE = "collection_batch_restore"
     QUESTION_CREATE = "question_create"
     QUESTION_UPDATE = "question_update"
+    QUESTION_DETACH = "question_detach"
     QUESTION_CLONE = "question_clone"
     QUESTION_TRASH = "question_trash"
     QUESTION_RESTORE = "question_restore"

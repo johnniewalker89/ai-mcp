@@ -113,6 +113,7 @@ COMPACT_MUTATION_ACTIONS = frozenset(
         Action.COLLECTION_BATCH_RESTORE,
         Action.QUESTION_CREATE,
         Action.QUESTION_UPDATE,
+        Action.QUESTION_DETACH,
         Action.QUESTION_CLONE,
         Action.QUESTION_TRASH,
         Action.QUESTION_RESTORE,
@@ -165,6 +166,7 @@ COMPACT_ACTION_ARGUMENT_KEYS: dict[Action, tuple[frozenset[str], frozenset[str]]
         frozenset({"collection_id", "to_root"}),
     ),
     Action.QUESTION_UPDATE: (frozenset({"question_id", "operations"}), frozenset()),
+    Action.QUESTION_DETACH: (frozenset({"question_id", "dashboard_id"}), frozenset()),
     Action.QUESTION_TRASH: (frozenset({"question_id"}), frozenset()),
     Action.QUESTION_RESTORE: (
         frozenset({"question_id"}),
@@ -245,6 +247,9 @@ COMPACT_ACTION_EXPECTED_SHAPES: dict[Action, str] = {
     Action.QUESTION_CLONE: ("arguments={source_question_id,name,collection_id?,to_root?}"),
     Action.QUESTION_UPDATE: (
         "arguments={question_id,operations:[{op,path,value?,item_id?,item_path?}]}"
+    ),
+    Action.QUESTION_DETACH: (
+        "arguments={question_id:positive_integer,dashboard_id:positive_integer}"
     ),
     Action.QUESTION_TRASH: "arguments={question_id}",
     Action.QUESTION_RESTORE: "arguments={question_id,collection_id?,to_root?}",
@@ -1247,8 +1252,16 @@ class MetabaseRuntime:
         return self._full_object(ObjectType.DASHBOARD, dashboard_id)
 
     def dashboard_get_layout(self, dashboard_id: int) -> dict[str, Any]:
+        """Возвращает раскладку дашборда по ID без полных тел карточек."""
         full = self.dashboard_get_full(dashboard_id)
-        raw = full["object"]
+        return {key: value for key, value in full.items() if key != "object"} | {
+            "projection": "layout",
+            "layout": self._dashboard_layout(full["object"]),
+        }
+
+    @staticmethod
+    def _dashboard_layout(raw: dict[str, Any]) -> dict[str, Any]:
+        """Выбирает видимые вкладки и позиции плиток из ответа Metabase."""
         tabs = raw.get("tabs")
         cards = raw.get("dashcards")
         if (
@@ -1288,14 +1301,11 @@ class MetabaseRuntime:
                 }
                 | {"name": (nested_card or {}).get("name")}
             )
-        return {key: value for key, value in full.items() if key != "object"} | {
-            "projection": "layout",
-            "layout": {
-                "name": raw.get("name"),
-                "width": raw.get("width"),
-                "tabs": copy.deepcopy(tabs),
-                "dashcards": dashcards,
-            },
+        return {
+            "name": raw.get("name"),
+            "width": raw.get("width"),
+            "tabs": copy.deepcopy(tabs),
+            "dashcards": dashcards,
         }
 
     def object_get(
@@ -3577,6 +3587,89 @@ class MetabaseRuntime:
             action=Action.QUESTION_UPDATE,
         )
 
+    def _detach_source_dashboard(self, dashboard_id: int) -> dict[str, Any]:
+        """Фиксирует коллекцию и раскладку дашборда, включая параметры и серии плиток."""
+        raw = self._object_raw(ObjectType.DASHBOARD, dashboard_id)
+        if (
+            type(raw.get("id")) is not int
+            or raw["id"] != dashboard_id
+            or type(raw.get("archived")) is not bool
+            or "collection_id" not in raw
+        ):
+            raise MutationValidationError("Source dashboard state has no exact identity or scope.")
+        layout = self._dashboard_layout(raw)
+        collection_id = raw["collection_id"]
+        if collection_id is not None:
+            self._positive_id(collection_id, "dashboard collection_id")
+        tiles = []
+        for dashcard in raw["dashcards"]:
+            series = dashcard.get("series")
+            if series is not None and not isinstance(series, list):
+                raise MutationValidationError("Dashboard tile series has an invalid shape.")
+            tiles.append(
+                {
+                    "parameter_mappings": dashcard.get("parameter_mappings"),
+                    "visualization_settings": dashcard.get("visualization_settings"),
+                    "series_ids": [
+                        self._positive_id(
+                            item.get("id") if isinstance(item, dict) else item, "series card id"
+                        )
+                        for item in (series or [])
+                    ],
+                }
+            )
+        return {
+            "id": dashboard_id,
+            "collection_id": collection_id,
+            "archived": raw["archived"],
+            "layout_sha256": canonical_sha256(
+                {"layout": layout, "parameters": raw.get("parameters"), "tiles": tiles}
+            ),
+        }
+
+    def question_detach_prepare(self, question_id: int, dashboard_id: int) -> dict[str, Any]:
+        """Готовит перенос карточки question_id из dashboard_id в его же коллекцию."""
+        question_id = self._positive_id(question_id, "question_id")
+        dashboard_id = self._positive_id(dashboard_id, "dashboard_id")
+        context = self._write_context()
+        before = project_state(
+            self._object_raw(ObjectType.QUESTION, question_id), ObjectType.QUESTION
+        )
+        if (
+            before["id"] != question_id
+            or before.get("archived") is not False
+            or type(before.get("dashboard_id")) is not int
+            or before["dashboard_id"] != dashboard_id
+        ):
+            raise MutationValidationError(
+                "Question must be active and owned by the given dashboard."
+            )
+        validate_state(before, ObjectType.QUESTION)
+        dashboard = self._detach_source_dashboard(dashboard_id)
+        if dashboard["archived"]:
+            raise MutationValidationError("Source dashboard must be active.")
+        if "collection_id" not in before or before["collection_id"] != dashboard["collection_id"]:
+            raise MutationValidationError("Question collection must match the source dashboard.")
+        after = copy.deepcopy(before)
+        after["dashboard_id"] = None
+        mutation = PlannedMutation(
+            object_type=ObjectType.QUESTION,
+            object_id=question_id,
+            before_state=before,
+            after_state=after,
+            write_payload={"dashboard_id": None, "collection_id": dashboard["collection_id"]},
+            changed_roots=("dashboard_id",),
+            before_sha256=object_state_sha256(before, ObjectType.QUESTION),
+            after_sha256=object_state_sha256(after, ObjectType.QUESTION),
+            target={"name": before["name"], "source_dashboard": dashboard},
+        )
+        return self._prepare_plan(
+            context=context,
+            action=Action.QUESTION_DETACH,
+            mutations=[mutation],
+            arguments={"question_id": question_id, "dashboard_id": dashboard_id},
+        )
+
     def question_trash_prepare(self, question_id: int) -> dict[str, Any]:
         return self._update_prepare(
             object_type=ObjectType.QUESTION,
@@ -4035,6 +4128,10 @@ class MetabaseRuntime:
         elif selected is Action.QUESTION_UPDATE:
             self._reject_lifecycle_patch(arguments["operations"])
             result = self.question_update_prepare(arguments["question_id"], arguments["operations"])
+        elif selected is Action.QUESTION_DETACH:
+            result = self.question_detach_prepare(
+                arguments["question_id"], arguments["dashboard_id"]
+            )
         elif selected is Action.NOTIFICATION_CREATE:
             result = self.notification_create_prepare(arguments["body"])
         elif selected is Action.NOTIFICATION_UPDATE:
@@ -4159,6 +4256,7 @@ class MetabaseRuntime:
             Action.COLLECTION_BATCH_RESTORE,
             Action.NOTIFICATION_UPDATE,
             Action.NOTIFICATION_CREATE,
+            Action.QUESTION_DETACH,
             Action.QUESTION_TRASH,
             Action.DASHBOARD_TRASH,
             Action.COLLECTION_TRASH,
@@ -4531,6 +4629,46 @@ class MetabaseRuntime:
                 else []
             ),
         }
+
+    def _execute_question_detach(self, mutation: PlannedMutation) -> tuple[Outcome, dict[str, Any]]:
+        """Перепроверяет дашборд до переноса и подтверждает его раскладку после записи."""
+        dashboard = mutation.target["source_dashboard"]
+        no_writes: dict[str, Any] = {
+            "object_results": [],
+            "applied_indexes": [],
+            "rollback_candidates": [],
+        }
+        try:
+            observed = self._detach_source_dashboard(dashboard["id"])
+        except (MetabaseApiError, MutationValidationError):
+            return Outcome.NOT_APPLIED_VERIFIED, {
+                **no_writes,
+                "reason": "source_dashboard_read_failed_before_write",
+            }
+        if observed != dashboard:
+            return Outcome.REJECTED_STALE, {
+                **no_writes,
+                "reason": "source_dashboard_changed_before_write",
+            }
+        outcome, result = self._execute_single_update(mutation)
+        result["rollback_candidates"] = []
+        if outcome is not Outcome.APPLIED_VERIFIED:
+            return outcome, result
+        try:
+            after = self._detach_source_dashboard(dashboard["id"])
+        except (MetabaseApiError, MutationValidationError):
+            return Outcome.PARTIALLY_APPLIED, {
+                **result,
+                "source_dashboard_verified": False,
+                "reason": "source_dashboard_readback_unavailable",
+            }
+        if after != dashboard:
+            return Outcome.PARTIALLY_APPLIED, {
+                **result,
+                "source_dashboard_verified": False,
+                "reason": "source_dashboard_changed_after_write",
+            }
+        return outcome, {**result, "source_dashboard_verified": True}
 
     def _recover_batch_after_unknown(
         self,
@@ -5382,6 +5520,8 @@ class MetabaseRuntime:
                 outcome, details = self._execute_batch(plan)
             elif plan.action is Action.DASHBOARD_CREATE:
                 outcome, details = self._execute_dashboard_create(plan.mutations[0])
+            elif plan.action is Action.QUESTION_DETACH:
+                outcome, details = self._execute_question_detach(plan.mutations[0])
             elif plan.action in simple_create_actions:
                 outcome, details = self._execute_simple_create(plan, plan.mutations[0])
             elif plan.action is Action.FIELD_VALUES_RESCAN:
@@ -5434,6 +5574,10 @@ class MetabaseRuntime:
         if source.server_version != context.get("version"):
             raise MetabasePolicyError(
                 "Metabase source plan belongs to a different exact server version."
+            )
+        if source.action is Action.QUESTION_DETACH:
+            raise MetabasePolicyError(
+                "Reattaching a detached question requires a separate supported move."
             )
         if source.outcome not in {Outcome.APPLIED_VERIFIED, Outcome.PARTIALLY_APPLIED}:
             raise MetabasePolicyError(
